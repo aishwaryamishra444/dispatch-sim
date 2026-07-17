@@ -1,0 +1,4 @@
+# Reference plant + commercial terms
+plant_mw: 10.0
+ppa_rate_inr_per_kwh: 2.60           # NEEDS-CONFIRMATION (range 2.5-3.5)
+om_inr_per_day: 20000                # D4: fixed per day. NEEDS-CONFIRMATION

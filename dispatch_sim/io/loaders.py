@@ -1,0 +1,69 @@
+"""Loaders — CSV time series, flexitwin battery spec, YAML configs.
+
+Input contracts (all 96 x 15-min blocks for one day):
+  forecast CSV: columns time,mw   (time = HH:MM)
+  actual   CSV: columns time,mw
+  flexitwin JSON: batteryUsableCapacity (MWh), cRateMW, roundTripEfficiency,
+                  socMinPct, socMaxPct
+"""
+
+from __future__ import annotations
+
+import csv
+import json
+from pathlib import Path
+from typing import List
+
+import yaml
+
+from dispatch_sim.core.battery import Battery
+from dispatch_sim.core.dsm_settlement import BandTable, DenominatorPolicy, DsmConfig
+
+BLOCKS = 96
+
+
+def load_series_csv(path: str | Path) -> List[float]:
+    with open(path, newline="") as f:
+        rows = list(csv.DictReader(f))
+    if len(rows) != BLOCKS:
+        raise ValueError(f"{path}: expected {BLOCKS} rows (15-min blocks), got {len(rows)}")
+    return [float(r["mw"]) for r in rows]
+
+
+def load_battery(path: str | Path) -> Battery:
+    spec = json.loads(Path(path).read_text())
+    return Battery(
+        usable_capacity_mwh=float(spec["batteryUsableCapacity"]),
+        c_rate_mw=float(spec["cRateMW"]),
+        rte=float(spec["roundTripEfficiency"]),
+        soc_min_pct=float(spec.get("socMinPct", 10)),
+        soc_max_pct=float(spec.get("socMaxPct", 90)),
+    )
+
+
+def load_yaml(path: str | Path) -> dict:
+    return yaml.safe_load(Path(path).read_text())
+
+
+def load_dsm_config(path: str | Path) -> DsmConfig:
+    c = load_yaml(path)
+    bands = BandTable(
+        name=f"{c['seller_type']} ({Path(path).name})",
+        edges_pct=tuple(float(x) for x in c["volume_limits_pct"]),
+        over_rates=tuple(float(x) for x in c["over_rates"]),
+        under_rates=tuple(float(x) for x in c["under_rates"]),
+    )
+    return DsmConfig(
+        bands=bands,
+        denominator=DenominatorPolicy(c.get("denominator", "available_capacity")),
+        blend_avc_pct=float(c.get("blend_avc_pct", 50)),
+    )
+
+
+def window_mask(win: dict) -> List[bool]:
+    """Boolean mask over 96 blocks for a {start: 'HH:MM', end: 'HH:MM'} window."""
+    def to_h(s):
+        hh, mm = s.split(":")
+        return int(hh) + int(mm) / 60.0
+    a, b = to_h(win["start"]), to_h(win["end"])
+    return [(a <= t * 0.25 < b) for t in range(BLOCKS)]

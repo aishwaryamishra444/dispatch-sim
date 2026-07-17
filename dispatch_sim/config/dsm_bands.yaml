@@ -1,0 +1,8 @@
+# CERC DSM 2024 — WS seller (solar). Update yearly; never edit code.
+# NEEDS-CONFIRMATION: verify against the notified text (5 Aug 2024) + amendments.
+seller_type: solar
+denominator: available_capacity      # available_capacity | schedule | blended
+blend_avc_pct: 50                    # only used when denominator: blended
+volume_limits_pct: [5, 10, 20]
+over_rates:  [1.00, 0.90, 0.50, 0.00]   # x contract rate, receivable by seller
+under_rates: [1.00, 1.10, 1.50, 2.00]   # x contract rate, payable by seller

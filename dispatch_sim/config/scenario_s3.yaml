@@ -1,0 +1,11 @@
+name: "S3 - Time windows"
+battery:
+  enabled: true
+  mode: time_windows
+charge_window:    {start: "09:00", end: "14:00"}   # NEEDS-CONFIRMATION with team
+discharge_window: {start: "18:00", end: "22:00"}
+charge_fraction: 0.35                 # share of in-window generation diverted to BESS
+cycles_per_day: 1
+schedule_integrated: true             # D2: planned windows baked into the schedule
+buffer_deviations_outside_windows: true
+degradation_inr_per_kwh: 2.5          # NEEDS-CONFIRMATION

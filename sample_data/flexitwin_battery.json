@@ -1,0 +1,7 @@
+{
+  "batteryUsableCapacity": 40,
+  "cRateMW": 20,
+  "roundTripEfficiency": 0.88,
+  "socMinPct": 10,
+  "socMaxPct": 90
+}

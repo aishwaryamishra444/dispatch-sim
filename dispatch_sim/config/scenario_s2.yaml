@@ -1,0 +1,6 @@
+name: "S2 - Battery buffer"
+battery:
+  enabled: true
+  mode: buffer                        # all generation passes through the BESS
+revise_schedule_for_rte: true         # D1: schedule = forecast x RTE (signed-off default)
+degradation_inr_per_kwh: 2.5          # D3: per kWh throughput, x0.5. NEEDS-CONFIRMATION
