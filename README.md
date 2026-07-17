@@ -1,4 +1,4 @@
-# dispatch_sim — Solar-BESS Baseline Scenarios 1-3
+# dispatch_sim - Solar-BESS Baseline Scenarios 1-3
 
 Input files in → simulation → xlsx out. One engine, scenarios as YAML configs,
 no solver (per the approved baseline plan; Scenario 5/Pyomo plugs in later).
@@ -16,7 +16,7 @@ python -m dispatch_sim.cli run-all \
 ```
 
 ## Inputs (swap sample_data for real feeds)
-- forecast CSV / actual CSV — 96 rows, columns `time,mw` (from the forecasting
+- forecast CSV / actual CSV - 96 rows, columns `time,mw` (from the forecasting
   module and plant telemetry)
 - flexitwin JSON — batteryUsableCapacity, cRateMW, roundTripEfficiency, SoC limits
 - dispatch_sim/config/*.yaml — PPA rate, O&M, CERC DSM bands, scenario knobs
