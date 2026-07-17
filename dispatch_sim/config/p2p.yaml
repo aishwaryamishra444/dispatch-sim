@@ -1,0 +1,7 @@
+# P2P market participation over UEI (build spec Sec 3.2, Eq. 8-10, Sec 6)
+price_floor_inr_per_kwh: 3.07    # APPC FY25-26 as floor proxy. NEEDS-CONFIRMATION
+price_cap_inr_per_kwh: 8.00      # retail DISCOM tariff ceiling proxy. NEEDS-CONFIRMATION
+clearing_mode: sdr               # sdr (v1) | admm_double_auction (v2)
+p2p_max_source: discom_vc        # P_P2P,max arrives via DISCOM-generated VC; mirrored with expiry check
+peer_registry_source: own_app    # Beckn registry read not yet exposed; synthetic peers in simulation
+wheeling_config: wheeling_charges.yaml   # C_wh per state (Eq. 2)

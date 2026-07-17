@@ -6,3 +6,11 @@ blend_avc_pct: 50                    # only used when denominator: blended
 volume_limits_pct: [5, 10, 20]
 over_rates:  [1.00, 0.90, 0.50, 0.00]   # x contract rate, receivable by seller
 under_rates: [1.00, 1.10, 1.50, 2.00]   # x contract rate, payable by seller
+
+# CERC X-trajectory (order dated 31 Mar 2026) — share of Available Capacity
+# in the deviation denominator, by fiscal year. X=100 -> pure AvC;
+# as X falls, deviation is judged against the submitted schedule.
+# NOTE: order under writ challenge (Delhi HC) — versioned, not hard-coded law.
+x_trajectory:
+  solar:  {FY26-27: 100, FY27-28: 90, FY28-29: 75, FY29-30: 55, FY30-31: 30, FY31+: 30}
+  wind:   {FY26-27: 100, FY27-28: 95, FY28-29: 85, FY29-30: 65, FY30-31: 35, FY31+: 0}

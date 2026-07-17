@@ -67,3 +67,18 @@ def window_mask(win: dict) -> List[bool]:
         return int(hh) + int(mm) / 60.0
     a, b = to_h(win["start"]), to_h(win["end"])
     return [(a <= t * 0.25 < b) for t in range(BLOCKS)]
+
+
+def x_factor_for_date(dsm_yaml: dict, seller: str, date) -> float:
+    """Resolve the CERC X-factor (%% of AvC in the deviation denominator)
+    from the x_trajectory table for a given date. Indian fiscal year:
+    Apr 1 - Mar 31. Falls back to 100 if no trajectory configured."""
+    traj = dsm_yaml.get("x_trajectory", {}).get(seller)
+    if not traj:
+        return 100.0
+    fy_start = date.year if date.month >= 4 else date.year - 1
+    key = f"FY{fy_start % 100}-{(fy_start + 1) % 100}"
+    if key in traj:
+        return float(traj[key])
+    last = sorted(k for k in traj if k.endswith("+"))
+    return float(traj[last[-1]]) if last else 100.0

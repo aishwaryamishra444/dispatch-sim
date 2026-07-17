@@ -1,0 +1,7 @@
+# Operational layer — rolling-horizon MPC (build spec Sec 2.2, Eq. 4)
+horizon_hours: 30                # H: 24-36h captures the day/night arbitrage cycle
+epoch_hours: 0.25                # 15-min blocks (fixed by DSM regime)
+scenarios: 20                    # |Omega| from the forecast module's probabilistic fan
+gamma: 1.0                       # weight on terminal value V_T(SoC); tuned by backtest, not sourced
+commit_first_epoch_only: true    # receding horizon: commit stage-1, re-solve next epoch
+solver: gurobi                   # gurobi | scip

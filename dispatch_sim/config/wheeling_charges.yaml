@@ -1,0 +1,38 @@
+# config/wheeling_charges.yaml — state-wise open-access charge stack (C_wh in Eq. 2)
+# Values: INR per kWh unless noted. FY 2025-26 benchmark ranges from public
+# tariff-order summaries; EVERY entry must be verified against the state's
+# current SERC tariff order before commercial use (verified: false till then).
+# Wheeling applies at distribution level; transmission (STU) is separate;
+# CSS/AS apply to third-party sale (captive/group-captive largely CSS-exempt).
+
+defaults:
+  sldc_scheduling: 0.10          # typical 0.05-0.15
+  banking_pct: 2.0               # % of banked energy, where banking exists
+  verified: false
+
+states:
+  karnataka:                     # pilot state
+    wheeling: 0.29
+    css: 0.60
+    additional_surcharge: 0.40
+    transmission_stu: 0.35
+    banking_pct: 4.0             # interim per HC direction pending new KERC regs
+    notes: "KERC 2025 GEOA regs; lowest wheeling among major states"
+  gujarat:
+    wheeling: {low: 0.30, high: 0.60}
+    notes: "among most attractive OA states"
+  maharashtra:
+    wheeling: {ht_33kv: 0.22, ht_11_22kv: 0.95, lt: 1.55}   # midpoints of MERC MYT ranges
+    wheeling_loss_pct: {ht_33kv: 6.0, ht_11_22kv: 9.0, lt: 12.0}
+    banking_pct: 8.0             # revised upward 2025
+    notes: "strongly voltage-dependent; MERC MYT order"
+  tamil_nadu:
+    wheeling: {low: 0.60, high: 1.00}
+    banking_pct: null            # 15-min block scheduling effectively removed banking
+    notes: "TNERC; historically high CSS"
+  rajasthan:
+    wheeling: null               # fill from RERC GEOA Regulations 2025
+    notes: "RERC Green Energy OA Regs 2025; competitive wheeling"
+  odisha:
+    css_exemption_pct: 50
+    notes: "50% CSS exemption for OA renewable procurement"

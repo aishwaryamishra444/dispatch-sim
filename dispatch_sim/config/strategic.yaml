@@ -1,0 +1,7 @@
+# Strategic layer — lifetime objective (build spec Sec 2.1, Eq. 3 & 7)
+# All values are OWNED parameters (config), per data-sourcing sheet sign-offs.
+lifetime_years: 12               # Y — per-asset; from battery WARRANTY doc. NEEDS-CONFIRMATION
+discount_rate: 0.10              # r — project WACC from finance team (typ. 9-11%). NEEDS-CONFIRMATION
+capex_inr: null                  # C_capex — per deployment; aggregator/IPP fills this
+lambda_deg_inr_per_kwh: 2.5      # v1: capex amortisation basis; v2: Rainflow-calibrated. NEEDS-CONFIRMATION
+resolve_monthly: true            # strategic program re-solved periodically, hands lambda_deg + V_T down
