@@ -7,6 +7,7 @@ are identical to the xlsx outputs, because it's the same code path.
 Run:   streamlit run demo_app.py     (from the repo root)
 """
 
+import time
 from pathlib import Path
 
 import numpy as np
@@ -188,6 +189,76 @@ with st.expander("🔬 Block-level settlement (researcher view)"):
     st.dataframe(bl, use_container_width=True, height=300, hide_index=True)
     st.download_button("⬇ Export CSV", bl.to_csv(index=False),
                        file_name=f"{pick[:2]}_blocks.csv")
+
+
+# ---------------------------------------------------------------- grid intelligence
+st.markdown("""
+<style>
+.gi-header {display:flex;align-items:center;gap:10px;margin:22px 0 6px;}
+.gi-title  {font-size:0.95rem;font-weight:600;letter-spacing:.16em;
+            text-transform:uppercase;color:#1D4ED8;}
+.gi-dot    {width:9px;height:9px;border-radius:50%;background:#1D4ED8;
+            animation:gipulse 1.6s ease-in-out infinite;}
+@keyframes gipulse{0%,100%{opacity:1;transform:scale(1);}
+                   50%{opacity:.25;transform:scale(.7);}}
+</style>
+<div class="gi-header"><span class="gi-dot"></span>
+<span class="gi-title">Grid Intelligence</span></div>
+""", unsafe_allow_html=True)
+
+def analyst(r1, r2, r3, deg, err):
+    p1, p2, p3 = r1.total("profit"), r2.total("profit"), r3.total("profit")
+    pen1 = r1.total("dsm_penalty")
+    gross1 = max(r1.total("ppa_revenue"), 1.0)
+    lines = [
+        f"On this weather day, {err}% forecast error cost the plant "
+        f"₹{pen1:,.0f} in true DSM penalty under S1 — "
+        f"{100 * pen1 / gross1:.1f}% of gross PPA revenue."
+    ]
+    if p2 < p1:
+        lines.append(
+            f"S2 buffered most deviation but destroyed ₹{p1 - p2:,.0f}/day of value: "
+            f"degradation (₹{r2.total('degradation'):,.0f}) plus round-trip losses "
+            f"exceeded the penalty avoided — at ₹{deg:.2f}/kWh, cycling everything "
+            f"is a cure costlier than the disease."
+        )
+    else:
+        lines.append(
+            f"Unusually, S2 beats S1 by ₹{p2 - p1:,.0f} today — cheap degradation "
+            f"(₹{deg:.2f}/kWh) and heavy forecast error make pure buffering pay."
+        )
+    if p3 >= p1:
+        lines.append(
+            f"S3 overtakes S1 by ₹{p3 - p1:,.0f}: at this degradation cost, timed "
+            f"shifting plus deviation buffering finally covers its own tolls."
+        )
+    else:
+        vs2 = f"recovers ₹{p3 - p2:,.0f} versus S2 but " if p3 > p2 else ""
+        lines.append(
+            f"S3 {vs2}still trails S1 by ₹{p1 - p3:,.0f} — under a flat PPA there "
+            f"is no price spread to capture, so timed shifting earns nothing it can bill."
+        )
+    if max(p2, p3) < p1:
+        lines.append(
+            "Implication: with a single fixed price, no rule-based strategy beats "
+            "doing nothing. That gap is the quantified case for the Scenario 5 "
+            "optimizer and P2P merchant revenue."
+        )
+    else:
+        lines.append(
+            "Implication: the battery verdict is driven almost entirely by the "
+            "degradation price — confirming it with the battery team is the "
+            "single highest-value open item."
+        )
+    return " ".join(lines)
+
+def _typed(text, delay=0.018):
+    for word in text.split(" "):
+        yield word + " "
+        time.sleep(delay)
+
+with st.container(border=True):
+    st.write_stream(_typed(analyst(r1, r2, r3, deg, err)))
 
 st.caption("dispatch_sim · github.com/aishwaryamishra444/dispatch-sim · "
            "values marked NEEDS-CONFIRMATION in config pending team sign-off")
