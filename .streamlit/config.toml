@@ -1,0 +1,7 @@
+[theme]
+base = "light"
+primaryColor = "#1D4ED8"               # dark blue — sliders, checkboxes, buttons, active tab
+backgroundColor = "#FFFFFF"            # white
+secondaryBackgroundColor = "#EFF4FB"   # soft blue-grey — sidebar & cards
+textColor = "#101828"
+font = "sans serif"
