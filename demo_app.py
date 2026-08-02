@@ -27,6 +27,39 @@ INR = lambda v: f"₹{v:,.0f}"
 st.set_page_config(page_title="Agentic Grid Simulator",
                    page_icon="⚡", layout="wide")
 
+st.markdown("""
+<style>
+/* IEX-style underlined tabs */
+.stTabs [data-baseweb="tab-list"] { gap: 4px; border-bottom: 2px solid #E5EAF1; }
+.stTabs [data-baseweb="tab"] {
+    height: 42px; padding: 0 18px; font-weight: 600; font-size: 0.92rem;
+    color: #5B6B7F; border-bottom: 3px solid transparent; margin-bottom: -2px;
+}
+.stTabs [aria-selected="true"] {
+    color: #1D4ED8 !important; border-bottom: 3px solid #1D4ED8 !important;
+}
+/* card panels (used with st.container(border=True)) */
+div[data-testid="stVerticalBlockBorderWrapper"] {
+    border-radius: 14px !important; border: 1px solid #E5EAF1 !important;
+    box-shadow: 0 1px 3px rgba(16,24,40,0.06); padding: 4px 2px;
+}
+/* header action-bar buttons */
+.gi-actionbar button {
+    border-radius: 8px !important; font-weight: 600 !important;
+}
+/* live badge */
+.agx-badge {display:inline-flex;align-items:center;gap:7px;
+    background:#EFF6FF;border:1px solid #BFDBFE;color:#1D4ED8;
+    padding:4px 12px;border-radius:999px;font-size:0.78rem;font-weight:700;
+    letter-spacing:.04em;text-transform:uppercase;}
+.agx-dot {width:7px;height:7px;border-radius:50%;background:#1D4ED8;
+    animation:agxpulse 1.6s ease-in-out infinite;}
+@keyframes agxpulse{0%,100%{opacity:1;transform:scale(1);}
+                    50%{opacity:.25;transform:scale(.7);}}
+</style>
+""", unsafe_allow_html=True)
+
+
 
 # ---------------------------------------------------------------- day maker
 def make_day(seed: int, err_pct: float, plant_mw: float):
@@ -160,32 +193,54 @@ r3 = run_s3(forecast, actual, plant, dsm_cfg, s3_cfg,
 results = {"S1 · PPA only": r1, "S2 · Battery buffer": r2, "S3 · Time windows": r3}
 
 # ---------------------------------------------------------------- header
-st.title("Agentic Grid Simulator")
-st.markdown("**Solar-BESS Dispatch — Baseline Scenarios**")
+hcol1, hcol2 = st.columns([3, 1])
+with hcol1:
+    st.markdown(
+        '<div class="agx-badge"><span class="agx-dot"></span>LIVE SIMULATION</div>',
+        unsafe_allow_html=True)
+    st.title("Agentic Grid Simulator")
+    st.markdown("**Solar-BESS Dispatch — Baseline Scenarios**")
+with hcol2:
+    st.markdown('<div class="gi-actionbar">', unsafe_allow_html=True)
+    comparison_export = pd.DataFrame({
+        "Scenario": list(results),
+        "Profit/day (INR)": [r.total("profit") for r in results.values()],
+        "DSM penalty (INR)": [r.total("dsm_penalty") for r in results.values()],
+        "Degradation (INR)": [r.total("degradation") for r in results.values()],
+    })
+    st.download_button("⬇ Export results", comparison_export.to_csv(index=False),
+                       file_name="agentic_grid_results.csv", use_container_width=True)
+    if st.button("↻ Refresh run", use_container_width=True):
+        st.rerun()
+    st.markdown('</div>', unsafe_allow_html=True)
+
 prov = "real uploaded generation data" if using_real else "synthetic weather day (upload a real one from the left panel)"
 st.caption(f"10 MW plant · flat-rate PPA · CERC DSM 2024 settlement per 15-min "
           f"block · {prov}")
 
-cols = st.columns(3)
-p1, p2_, p3 = (r.total("profit") for r in (r1, r2, r3))
-cols[0].metric("S1 · PPA only", INR(p1), f"DSM −{INR(r1.total('dsm_penalty'))}",
-               delta_color="inverse")
-cols[1].metric("S2 · Battery buffer", INR(p2_), f"{INR(p2_-p1)} vs S1",
-               delta_color="normal" if p2_ >= p1 else "inverse")
-cols[2].metric("S3 · Time windows", INR(p3), f"{INR(p3-p1)} vs S1",
-               delta_color="normal" if p3 >= p1 else "inverse")
+with st.container(border=True):
+    cols = st.columns(3)
+    p1, p2_, p3 = (r.total("profit") for r in (r1, r2, r3))
+    cols[0].metric("S1 · PPA only", INR(p1), f"DSM −{INR(r1.total('dsm_penalty'))}",
+                   delta_color="inverse")
+    cols[1].metric("S2 · Battery buffer", INR(p2_), f"{INR(p2_-p1)} vs S1",
+                   delta_color="normal" if p2_ >= p1 else "inverse")
+    cols[2].metric("S3 · Time windows", INR(p3), f"{INR(p3-p1)} vs S1",
+                   delta_color="normal" if p3 >= p1 else "inverse")
 
-best = max(results, key=lambda k: results[k].total("profit"))
-worst_msg = (" — the battery cannot pay for itself on DSM avoidance alone "
-             "under a flat PPA. That gap is the case for the Scenario 5 optimizer."
-             if best == "S1 · PPA only" else "")
-st.info(f"**Best today: {best}** at "
-        f"{INR(results[best].total('profit'))}/day{worst_msg}")
+    best = max(results, key=lambda k: results[k].total("profit"))
+    worst_msg = (" — the battery cannot pay for itself on DSM avoidance alone "
+                 "under a flat PPA. That gap is the case for the Scenario 5 optimizer."
+                 if best == "S1 · PPA only" else "")
+    st.info(f"**Best today: {best}** at "
+            f"{INR(results[best].total('profit'))}/day{worst_msg}")
 
+st.write("")
 # ---------------------------------------------------------------- day chart
+st.markdown("##### 📊 Day profile — schedule vs. delivered")
 tabs = st.tabs(list(results))
 for tab, (name, r) in zip(tabs, results.items()):
-    with tab:
+    with tab, st.container(border=True):
         fig = go.Figure()
         fig.add_scatter(x=hours, y=[m * 4 for m in
                         [row.actual_gen_mwh for row in r.rows]],
@@ -207,44 +262,48 @@ for tab, (name, r) in zip(tabs, results.items()):
                           xaxis_title="Hour of day", yaxis_title="MW")
         st.plotly_chart(fig, use_container_width=True)
 
+st.write("")
 # ---------------------------------------------------------------- P&L
-st.subheader("Daily P&L decomposition")
+st.markdown("##### 💰 Daily P&L decomposition")
 names = list(results)
-fig = go.Figure()
-fig.add_bar(name="PPA revenue", x=names,
-            y=[r.total("ppa_revenue") for r in results.values()],
-            marker_color="#16202E")
-fig.add_bar(name="DSM receivable", x=names,
-            y=[r.total("dsm_receivable") for r in results.values()],
-            marker_color="#1D4ED8")
-fig.add_bar(name="DSM payable", x=names,
-            y=[-r.total("dsm_payable") for r in results.values()],
-            marker_color="#DC2626")
-fig.add_bar(name="Degradation", x=names,
-            y=[-r.total("degradation") for r in results.values()],
-            marker_color="#F59E0B")
-fig.add_bar(name="O&M", x=names,
-            y=[-r.total("om") for r in results.values()], marker_color="#8A97A8")
-fig.update_layout(barmode="relative", height=320,
-                  margin=dict(l=10, r=10, t=10, b=10),
-                  legend=dict(orientation="h", y=1.12))
-st.plotly_chart(fig, use_container_width=True)
+with st.container(border=True):
+    fig = go.Figure()
+    fig.add_bar(name="PPA revenue", x=names,
+                y=[r.total("ppa_revenue") for r in results.values()],
+                marker_color="#16202E")
+    fig.add_bar(name="DSM receivable", x=names,
+                y=[r.total("dsm_receivable") for r in results.values()],
+                marker_color="#1D4ED8")
+    fig.add_bar(name="DSM payable", x=names,
+                y=[-r.total("dsm_payable") for r in results.values()],
+                marker_color="#DC2626")
+    fig.add_bar(name="Degradation", x=names,
+                y=[-r.total("degradation") for r in results.values()],
+                marker_color="#F59E0B")
+    fig.add_bar(name="O&M", x=names,
+                y=[-r.total("om") for r in results.values()], marker_color="#8A97A8")
+    fig.update_layout(barmode="relative", height=320,
+                      margin=dict(l=10, r=10, t=10, b=10),
+                      legend=dict(orientation="h", y=1.12))
+    st.plotly_chart(fig, use_container_width=True)
 
-df = pd.DataFrame({
-    "Scenario": names,
-    "PPA revenue": [r.total("ppa_revenue") for r in results.values()],
-    "DSM net": [r.total("dsm_receivable") - r.total("dsm_payable")
-                for r in results.values()],
-    "Degradation": [r.total("degradation") for r in results.values()],
-    "O&M": [r.total("om") for r in results.values()],
-    "Profit/day": [r.total("profit") for r in results.values()],
-    "Profit/year (330d)": [r.total("profit") * 330 for r in results.values()],
-})
-st.dataframe(df.style.format({c: "₹{:,.0f}" for c in df.columns[1:]}),
-             use_container_width=True, hide_index=True)
+    df = pd.DataFrame({
+        "Scenario": names,
+        "PPA revenue": [r.total("ppa_revenue") for r in results.values()],
+        "DSM net": [r.total("dsm_receivable") - r.total("dsm_payable")
+                    for r in results.values()],
+        "Degradation": [r.total("degradation") for r in results.values()],
+        "O&M": [r.total("om") for r in results.values()],
+        "Profit/day": [r.total("profit") for r in results.values()],
+        "Profit/year (330d)": [r.total("profit") * 330 for r in results.values()],
+    })
+    st.dataframe(df.style.format({c: "₹{:,.0f}" for c in df.columns[1:]}),
+                use_container_width=True, hide_index=True)
 
+st.write("")
 # ---------------------------------------------------------------- researcher
-with st.expander("🔬 Block-level settlement (researcher view)"):
+st.markdown("##### 🔬 Researcher tools")
+with st.container(border=True), st.expander("Block-level settlement (96 rows)"):
     pick = st.selectbox("Scenario", names)
     r = results[pick]
     bl = pd.DataFrame([{
@@ -259,6 +318,7 @@ with st.expander("🔬 Block-level settlement (researcher view)"):
                        file_name=f"{pick[:2]}_blocks.csv")
 
 
+st.write("")
 # ---------------------------------------------------------------- grid intelligence
 st.markdown("""
 <style>
