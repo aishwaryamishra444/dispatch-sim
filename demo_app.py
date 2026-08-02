@@ -16,7 +16,8 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from dispatch_sim.core.battery import Battery
-from dispatch_sim.io.loaders import load_dsm_config, load_yaml
+from dispatch_sim.io.loaders import load_dsm_config, load_yaml, load_series_csv_buffer
+from dispatch_sim.io.iex_loader import IEXFormatError, parse_iex_file
 from dispatch_sim.runners.rules import run_s1, run_s2, run_s3
 
 CFG = Path(__file__).parent / "dispatch_sim" / "config"
@@ -58,6 +59,67 @@ def fresh_battery(spec_overrides=None):
 st.sidebar.title("⚡ Agentic Grid Simulator")
 st.sidebar.caption("Baseline Scenarios 1–3 · CERC DSM 2024")
 
+st.sidebar.divider()
+st.sidebar.subheader("📥 Data source")
+data_mode = st.sidebar.radio(
+    "Generation data", ["Synthetic (demo)", "Upload real day"],
+    label_visibility="collapsed",
+    help="Real data replaces the synthetic weather day used for the demo — "
+         "the settlement math is unchanged either way.")
+
+real_forecast, real_actual = None, None
+if data_mode == "Upload real day":
+    st.sidebar.caption("CSV format: columns `time,mw` · 96 rows (15-min blocks). "
+                       "Same format the CLI (`--forecast`/`--actual`) expects.")
+    fc_file = st.sidebar.file_uploader("Forecast CSV (day-ahead schedule basis)",
+                                       type=["csv"], key="fc_upload")
+    act_file = st.sidebar.file_uploader("Actual generation CSV (telemetry)",
+                                        type=["csv"], key="act_upload")
+    if fc_file is not None:
+        try:
+            real_forecast = load_series_csv_buffer(fc_file, fc_file.name)
+            st.sidebar.success(f"✅ Forecast: {len(real_forecast)} blocks loaded.")
+        except Exception as e:
+            st.sidebar.error(str(e))
+    if act_file is not None:
+        try:
+            real_actual = load_series_csv_buffer(act_file, act_file.name)
+            st.sidebar.success(f"✅ Actual: {len(real_actual)} blocks loaded.")
+        except Exception as e:
+            st.sidebar.error(str(e))
+    if fc_file is None or act_file is None:
+        st.sidebar.caption("Upload both files to switch off synthetic data — "
+                           "showing the synthetic day below until then.")
+
+with st.sidebar.expander("📈 Real IEX price upload (for future P2P scenarios)"):
+    st.caption("Baseline Scenarios S1-S3 are PPA-only per the team plan and do "
+              "not consume market price — this loader is here for Scenario 5 / "
+              "P2P work, not wired into today's profit numbers.")
+    iex_file = st.file_uploader(
+        "IEX Area Price / Market Snapshot", type=["csv", "xls", "xlsx"],
+        key="iex_upload",
+        help="Download from iexindia.com -> Market Data -> Day Ahead Market "
+             "-> Market Snapshot / Area Price.")
+    if iex_file is not None:
+        try:
+            iex_result = parse_iex_file(iex_file)
+            st.success(f"Parsed {iex_result.detected_rows} rows from "
+                      f"'{iex_file.name}' (column: {iex_result.source_columns['price']}). "
+                      f"Not yet applied to S1-S3 profit — reserved for Scenario 5.")
+        except IEXFormatError as e:
+            st.warning(f"Couldn't auto-detect columns: {e}")
+            if e.columns:
+                tcol = st.selectbox("Time column", e.columns, key="iex_tcol")
+                pcol = st.selectbox("Price column", e.columns, key="iex_pcol")
+                if st.button("Parse with these columns", key="iex_parse_btn"):
+                    try:
+                        iex_file.seek(0)
+                        r2 = parse_iex_file(iex_file, time_col=tcol, price_col=pcol)
+                        st.success(f"Parsed using '{tcol}' / '{pcol}'.")
+                    except Exception as e2:
+                        st.error(f"Still couldn't parse: {e2}")
+
+st.sidebar.divider()
 err = st.sidebar.slider("Forecast error σ (%)", 3, 30, 12,
                         help="Gap between day-ahead forecast and actual generation")
 ppa = st.sidebar.slider("PPA tariff (₹/kWh)", 2.0, 4.5, 2.60, 0.05)
@@ -83,7 +145,12 @@ s2_cfg = load_yaml(CFG / "scenario_s2.yaml"); s2_cfg["degradation_inr_per_kwh"] 
 s3_cfg = load_yaml(CFG / "scenario_s3.yaml"); s3_cfg["degradation_inr_per_kwh"] = deg
 s1_cfg = load_yaml(CFG / "scenario_s1.yaml")
 
-forecast, actual, hours = make_day(st.session_state.seed, err, plant["plant_mw"])
+using_real = real_forecast is not None and real_actual is not None
+if using_real:
+    forecast, actual = real_forecast, real_actual
+    hours = np.arange(BLOCKS) * DT
+else:
+    forecast, actual, hours = make_day(st.session_state.seed, err, plant["plant_mw"])
 
 r1 = run_s1(forecast, actual, plant, dsm_cfg, s1_cfg)
 r2 = run_s2(forecast, actual, plant, dsm_cfg, s2_cfg,
@@ -95,8 +162,9 @@ results = {"S1 · PPA only": r1, "S2 · Battery buffer": r2, "S3 · Time windows
 # ---------------------------------------------------------------- header
 st.title("Agentic Grid Simulator")
 st.markdown("**Solar-BESS Dispatch — Baseline Scenarios**")
-st.caption("10 MW plant · flat-rate PPA · CERC DSM 2024 settlement per 15-min "
-           "block · synthetic weather day (historical replay: Phase 1)")
+prov = "real uploaded generation data" if using_real else "synthetic weather day (upload a real one from the left panel)"
+st.caption(f"10 MW plant · flat-rate PPA · CERC DSM 2024 settlement per 15-min "
+          f"block · {prov}")
 
 cols = st.columns(3)
 p1, p2_, p3 = (r.total("profit") for r in (r1, r2, r3))

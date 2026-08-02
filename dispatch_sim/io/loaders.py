@@ -30,6 +30,29 @@ def load_series_csv(path: str | Path) -> List[float]:
     return [float(r["mw"]) for r in rows]
 
 
+def load_series_csv_buffer(buffer, label: str = "file") -> List[float]:
+    """Same contract as load_series_csv (columns time,mw, 96 rows) but reads
+    from an in-memory buffer -- e.g. a Streamlit UploadedFile -- instead of a
+    path. Column name is matched case-insensitively so 'MW'/'Mw'/'mw' all work."""
+    if hasattr(buffer, "seek"):
+        buffer.seek(0)
+    raw = buffer.read()
+    text = raw.decode("utf-8") if isinstance(raw, bytes) else raw
+    rows = list(csv.DictReader(text.splitlines()))
+    if not rows:
+        raise ValueError(f"{label}: file is empty or has no header row.")
+    mw_key = next((k for k in rows[0] if k.strip().lower() == "mw"), None)
+    if mw_key is None:
+        raise ValueError(
+            f"{label}: no 'mw' column found - columns present: {list(rows[0].keys())}")
+    if len(rows) != BLOCKS:
+        raise ValueError(f"{label}: expected {BLOCKS} rows (15-min blocks), got {len(rows)}")
+    try:
+        return [float(r[mw_key]) for r in rows]
+    except ValueError as e:
+        raise ValueError(f"{label}: non-numeric value in '{mw_key}' column - {e}") from e
+
+
 def load_battery(path: str | Path) -> Battery:
     spec = json.loads(Path(path).read_text())
     return Battery(
