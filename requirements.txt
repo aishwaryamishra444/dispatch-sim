@@ -6,3 +6,4 @@ pyyaml
 openpyxl
 pytest
 gymnasium
+pulp

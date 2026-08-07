@@ -20,6 +20,7 @@ from dispatch_sim.core.battery import Battery
 from dispatch_sim.io.loaders import load_dsm_config, load_yaml, load_series_csv_buffer
 from dispatch_sim.io.iex_loader import IEXFormatError, parse_iex_file
 from dispatch_sim.runners.rules import run_s1, run_s2, run_s3
+from dispatch_sim.optimizer.lp_dispatch import OptimizerBatterySpec, solve_optimal_dispatch
 
 CFG = Path(__file__).parent / "dispatch_sim" / "config"
 BLOCKS, DT = 96, 0.25
@@ -322,6 +323,16 @@ r3 = run_s3(forecast, actual, plant, dsm_cfg, s3_cfg,
             fresh_battery({"batteryUsableCapacity": float(cap)}))
 results = {"S1 - PPA only": r1, "S2 - Battery buffer": r2, "S3 - Time windows": r3}
 
+optimizer_error = None
+try:
+    r5 = solve_optimal_dispatch(
+        forecast, actual, plant, dsm_cfg,
+        OptimizerBatterySpec(float(cap), 20.0, 0.88, 10, 90), deg)
+    results["S5 - Optimizer"] = r5
+except Exception as e:  # noqa: BLE001 -- never let a solver hiccup crash the demo
+    optimizer_error = str(e)
+    r5 = None
+
 # ---------------------------------------------------------------- header
 st.markdown(
     f'<div class="au-mark-row">{au_mark(26)}'
@@ -468,12 +479,34 @@ with tab_sim:
         cols[2].metric("S3 - Time windows", INR(p3), f"{INR(p3-p1)} vs S1",
                        delta_color="normal" if p3 >= p1 else "inverse")
 
-        best = max(results, key=lambda k: results[k].total("profit"))
+        baseline_keys = ["S1 - PPA only", "S2 - Battery buffer", "S3 - Time windows"]
+        best = max(baseline_keys, key=lambda k: results[k].total("profit"))
         worst_msg = (" -- the battery cannot pay for itself on DSM avoidance alone "
                      "under a flat PPA. That gap is the case for the Scenario 5 optimizer."
                      if best == "S1 - PPA only" else "")
-        st.info(f"**Best today: {best}** at "
+        st.info(f"**Best baseline today: {best}** at "
                 f"{INR(results[best].total('profit'))}/day{worst_msg}")
+
+    st.write("")
+    if r5 is not None:
+        uplift = r5.total("profit") - results[best].total("profit")
+        with st.container(border=True):
+            st.markdown('<div class="au-section">Optimizer opportunity -- Scenario 5</div>',
+                       unsafe_allow_html=True)
+            ocol1, ocol2, ocol3 = st.columns(3)
+            ocol1.metric("Optimizer profit/day", INR(r5.total("profit")))
+            ocol2.metric("Uplift vs best baseline",
+                        f"+{INR(uplift)}" if uplift >= 0 else INR(uplift),
+                        delta_color="normal" if uplift >= 0 else "inverse")
+            ocol3.metric("Annualized uplift (330d)", INR(uplift * 330))
+            st.caption(
+                "LP-based dispatch optimizer: chooses the schedule and battery "
+                "trajectory that jointly maximize profit under the exact same "
+                "CERC DSM 2024 settlement engine as the baselines above. Reported "
+                "as a perfect-foresight upper bound -- the ceiling this quantifies "
+                "how much value a real-time optimizer could recover.")
+    elif optimizer_error:
+        st.caption(f"Optimizer unavailable this run: {optimizer_error}")
 
     st.write("")
     st.markdown('<div class="au-section">Day profile -- schedule vs delivered</div>',
@@ -561,7 +594,7 @@ with tab_sim:
     <span class="gi-title">Grid Intelligence</span></div>
     """, unsafe_allow_html=True)
 
-    def analyst(r1, r2, r3, deg, err):
+    def analyst(r1, r2, r3, deg, err, r5=None):
         p1, p2, p3 = r1.total("profit"), r2.total("profit"), r3.total("profit")
         pen1 = r1.total("dsm_penalty")
         gross1 = max(r1.total("ppa_revenue"), 1.0)
@@ -605,6 +638,16 @@ with tab_sim:
                 "degradation price -- confirming it with the battery team is the "
                 "single highest-value open item."
             )
+        if r5 is not None:
+            best_baseline = max(p1, p2, p3)
+            uplift = r5.total("profit") - best_baseline
+            if uplift > 1:
+                lines.append(
+                    f"The Scenario 5 optimizer earns Rs {r5.total('profit'):,.0f}/day -- "
+                    f"Rs {uplift:,.0f} more than the best baseline strategy today. That "
+                    f"gap, roughly Rs {uplift*330/1e5:,.1f} lakh a year, is value left on "
+                    f"the table by any fixed rule, however well-chosen."
+                )
         return " ".join(lines)
 
     def _typed(text, delay=0.018):
@@ -613,7 +656,7 @@ with tab_sim:
             time.sleep(delay)
 
     with st.container(border=True):
-        st.write_stream(_typed(analyst(r1, r2, r3, deg, err)))
+        st.write_stream(_typed(analyst(r1, r2, r3, deg, err, r5)))
 
 
 with tab_tech:
