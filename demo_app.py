@@ -284,12 +284,75 @@ with st.sidebar.expander("Real IEX price upload (for future P2P scenarios)"):
                         st.error(f"Still couldn't parse: {e2}")
 
 st.sidebar.divider()
-err = st.sidebar.slider("Forecast error (%)", 3, 30, 12,
-                        help="Gap between day-ahead forecast and actual generation")
+err = st.sidebar.slider("Generation Deviation: Actual vs Scheduled (%)", 3, 30, 12,
+                        help="How far actual generation lands from the day-ahead "
+                             "schedule. This single input is what drives every DSM "
+                             "penalty below -- it IS the 'Actual minus Scheduled' gap, "
+                             "expressed as a percentage. Watch S1/S2/S3 change as you "
+                             "move it.")
 ppa = st.sidebar.slider("PPA tariff (Rs/kWh)", 2.0, 4.5, 2.60, 0.05)
-deg = st.sidebar.slider("Battery degradation (Rs/kWh cycled)", 0.5, 3.0, 2.5, 0.1,
-                        help="The single most sensitive input - flips S2/S3 economics")
-cap = st.sidebar.slider("BESS capacity (MWh)", 10, 80, 40, 5)
+
+with st.sidebar.expander("Battery degradation -- research & calculator"):
+    st.caption(
+        "**Internationally sourced range.** IRENA (International Renewable "
+        "Energy Agency) reports 2024 battery storage installed cost at "
+        "$197/kWh, down 93% from $2,634/kWh in 2010. Peer-reviewed power "
+        "systems literature commonly assumes a 3,000-cycle life for "
+        "grid-scale lithium-ion; published LFP chemistry specs (the "
+        "dominant chemistry for stationary storage) range 2,500-9,000 "
+        "cycles. Amortizing IRENA's cost over that cycle range gives:"
+    )
+    st.markdown(
+        "- **3,000 cycles:** ~Rs 5.58/kWh cycled\n"
+        "- **6,000 cycles:** ~Rs 2.79/kWh cycled\n"
+        "- **9,000 cycles:** ~Rs 1.86/kWh cycled"
+    )
+    st.caption(
+        "(Using an approximate Rs 85/$ rate -- re-verify against a live "
+        "rate for a final figure. Our Rs 2.50/kWh default sits inside this "
+        "sourced range, close to the 6,000-cycle midpoint.)"
+    )
+    st.divider()
+    st.caption(
+        "**Or calculate from your own battery quote** -- same linear "
+        "amortization method used in the academic literature above "
+        "(cost per cycle / usable capacity)."
+    )
+    calc_mode = st.radio("I know the warranty in:", ["Cycles", "Years"],
+                        horizontal=True, key="deg_calc_mode")
+    capex = st.number_input("Battery purchase price (Rs)", min_value=0.0,
+                            value=669_800_000.0, step=1_000_000.0, format="%.0f",
+                            help="Default reflects IRENA's 2024 $197/kWh for a "
+                                 "40 MWh system at ~Rs 85/$.")
+    usable_kwh = st.number_input("Usable capacity (kWh)", min_value=1.0,
+                                 value=float(st.session_state.get("cap_val", 40)) * 1000,
+                                 step=1000.0, format="%.0f",
+                                 help="Defaults to the BESS capacity slider below, in kWh.")
+    if calc_mode == "Cycles":
+        warranted_cycles = st.number_input("Warranted cycles", min_value=1.0,
+                                           value=6000.0, step=100.0)
+    else:
+        warranted_years = st.number_input("Warranted years", min_value=0.1,
+                                          value=15.0, step=0.5)
+        cycles_per_day = st.number_input("Assumed full cycles per day", min_value=0.01,
+                                         value=1.0, step=0.1)
+        warranted_cycles = warranted_years * cycles_per_day * 330
+
+    cost_per_cycle = capex / warranted_cycles
+    computed_deg = cost_per_cycle / usable_kwh
+    computed_deg_clamped = min(max(computed_deg, 0.5), 6.0)
+
+    st.markdown(f"**-> Degradation cost: Rs {computed_deg:.2f}/kWh cycled**")
+    if st.button("Apply to slider below"):
+        st.session_state["deg_val"] = computed_deg_clamped
+        st.rerun()
+
+deg = st.sidebar.slider("Battery degradation (Rs/kWh cycled)", 0.5, 6.0,
+                        st.session_state.get("deg_val", 2.5), 0.1, key="deg_val",
+                        help="The single most sensitive input - flips S2/S3 economics. "
+                             "Sourced range: Rs 1.86-5.58/kWh per IRENA 2024 + peer-"
+                             "reviewed cycle-life literature (see expander above).")
+cap = st.sidebar.slider("BESS capacity (MWh)", 10, 80, 40, 5, key="cap_val")
 
 if "seed" not in st.session_state:
     st.session_state.seed = 20260614
@@ -319,8 +382,17 @@ else:
 r1 = run_s1(forecast, actual, plant, dsm_cfg, s1_cfg)
 r2 = run_s2(forecast, actual, plant, dsm_cfg, s2_cfg,
             fresh_battery({"batteryUsableCapacity": float(cap)}))
-r3 = run_s3(forecast, actual, plant, dsm_cfg, s3_cfg,
-            fresh_battery({"batteryUsableCapacity": float(cap)}))
+
+# S3 is now ADAPTIVE: the fixed noon-charge/evening-discharge rule is only
+# followed if it actually beats not using the battery at all. A rational
+# operator wouldn't blindly run a battery that loses money -- so neither
+# does this strategy. r3_raw is what the fixed rule alone would have
+# produced; r3 is what actually gets reported, and battery_deployed tells
+# the UI which one happened.
+r3_raw = run_s3(forecast, actual, plant, dsm_cfg, s3_cfg,
+                fresh_battery({"batteryUsableCapacity": float(cap)}))
+battery_deployed = r3_raw.total("profit") > r1.total("profit")
+r3 = r3_raw if battery_deployed else r1
 results = {"S1 - PPA only": r1, "S2 - Battery buffer": r2, "S3 - Time windows": r3}
 
 optimizer_error = None
@@ -333,21 +405,98 @@ except Exception as e:  # noqa: BLE001 -- never let a solver hiccup crash the de
     optimizer_error = str(e)
     r5 = None
 
-# ---------------------------------------------------------------- header
-st.markdown(
-    f'<div class="au-mark-row">{au_mark(26)}'
-    f'<span class="au-mark-sub">Atria University -- Centre of Excellence</span></div>',
-    unsafe_allow_html=True)
-st.markdown(
-    '<div class="au-badge"><span class="au-dot"></span>Live simulation</div>',
-    unsafe_allow_html=True)
+# ---------------------------------------------------------------- hero
+import base64
 
+HERO_IMG_PATH = Path(__file__).parent / "hero_solar.jpg"
+
+def solar_hero_html():
+    """Cinematic hero banner: a real solar farm photo (AI-generated by the
+    user, local file, no external hosting) with a slow CSS "Ken Burns"
+    zoom/pan and drifting bokeh-light particles for a video-like feel --
+    no actual video file needed or available, so motion is done in pure
+    CSS animation instead. Rendered via components.html, the reliable path
+    for anything beyond trivial inline HTML."""
+    with open(HERO_IMG_PATH, "rb") as f:
+        b64 = base64.b64encode(f.read()).decode("ascii")
+
+    particles = "".join(
+        f'<div class="agx-bokeh" style="left:{x}%;width:{w}px;height:{w}px;'
+        f'animation-delay:{d}s;animation-duration:{dur}s;"></div>'
+        for x, w, d, dur in [
+            (8, 10, 0, 14), (18, 6, 3, 18), (30, 14, 1.5, 16),
+            (46, 8, 5, 20), (60, 12, 2, 15), (74, 7, 6, 19),
+            (85, 16, 0.5, 13), (93, 9, 4, 17),
+        ]
+    )
+
+    return f"""
+    <style>
+      @keyframes agx-kenburns {{
+        0%   {{ transform: scale(1.0) translate(0,0); }}
+        50%  {{ transform: scale(1.10) translate(-1.2%,-0.8%); }}
+        100% {{ transform: scale(1.0) translate(0,0); }}
+      }}
+      @keyframes agx-float {{
+        0%   {{ transform: translateY(0); opacity: 0; }}
+        10%  {{ opacity: .55; }}
+        90%  {{ opacity: .35; }}
+        100% {{ transform: translateY(-340px); opacity: 0; }}
+      }}
+      .agx-bg {{
+        position: absolute; inset: -4%; background-image:
+          url(data:image/jpeg;base64,{b64});
+        background-size: cover; background-position: center;
+        animation: agx-kenburns 22s ease-in-out infinite;
+      }}
+      .agx-bokeh {{
+        position: absolute; bottom: -20px; border-radius: 50%;
+        background: radial-gradient(circle, rgba(255,238,200,.9) 0%,
+                    rgba(255,238,200,0) 70%);
+        filter: blur(1px);
+        animation-name: agx-float; animation-timing-function: ease-in;
+        animation-iteration-count: infinite;
+      }}
+    </style>
+    <div style="position:relative;width:100%;height:400px;overflow:hidden;
+                border-radius:18px;font-family:sans-serif;">
+      <div class="agx-bg"></div>
+      <div style="position:absolute;inset:0;background:linear-gradient(
+                  180deg,rgba(8,14,26,.55) 0%,rgba(8,14,26,.30) 45%,
+                  rgba(8,14,26,.62) 100%);"></div>
+      {particles}
+      <div style="position:absolute;inset:0;display:flex;flex-direction:column;
+                  align-items:center;justify-content:center;text-align:center;
+                  padding:0 24px;">
+        <div style="font-size:13px;font-weight:700;letter-spacing:.22em;
+                    color:#EAF1FF;text-transform:uppercase;opacity:.85;">
+          Atria University -- Centre of Excellence</div>
+        <div style="font-size:52px;font-weight:800;color:#FFFFFF;
+                    margin-top:14px;letter-spacing:.02em;
+                    text-shadow:0 4px 18px rgba(0,0,0,.45);">
+          Agentic Grid Simulator</div>
+        <div style="font-size:17px;color:#EAF1FF;margin-top:14px;
+                    max-width:640px;opacity:.92;">
+          A live digital twin of a solar-BESS plant's daily economics,
+          under India's real CERC deviation settlement regulation.</div>
+        <div style="margin-top:26px;color:#FFFFFF;font-size:14px;
+                    font-weight:600;letter-spacing:.08em;
+                    border:1.5px solid rgba(255,255,255,.55);
+                    border-radius:999px;padding:10px 26px;opacity:.9;">
+          SCROLL TO SIMULATE &#8595;</div>
+      </div>
+    </div>"""
+
+components.html(solar_hero_html(), height=420, scrolling=False)
+st.write("")
+
+# ---------------------------------------------------------------- header
 hcol1, hcol2 = st.columns([4, 2])
 with hcol1:
-    st.title("Agentic Grid Simulator")
-    st.markdown("**Solar-BESS Dispatch -- Baseline Scenarios**")
+    st.markdown(
+        '<div class="au-badge"><span class="au-dot"></span>Live simulation</div>',
+        unsafe_allow_html=True)
 with hcol2:
-    st.write("")
     bcol1, bcol2 = st.columns(2)
     comparison_export = pd.DataFrame({
         "Scenario": list(results),
@@ -469,23 +618,96 @@ tab_sim, tab_tech, tab_docs, tab_contact = st.tabs(
 
 with tab_sim:
     st.write("")
-    with st.container(border=True):
-        cols = st.columns(3)
-        p1, p2_, p3 = (r.total("profit") for r in (r1, r2, r3))
-        cols[0].metric("S1 - PPA only", INR(p1), f"DSM -{INR(r1.total('dsm_penalty'))}",
-                       delta_color="inverse")
-        cols[1].metric("S2 - Battery buffer", INR(p2_), f"{INR(p2_-p1)} vs S1",
-                       delta_color="normal" if p2_ >= p1 else "inverse")
-        cols[2].metric("S3 - Time windows", INR(p3), f"{INR(p3-p1)} vs S1",
-                       delta_color="normal" if p3 >= p1 else "inverse")
+    st.markdown(
+        "### :orange[Solar] + :green[Battery] Dispatch Simulator\n"
+        "A live digital twin of a solar-BESS plant's daily economics -- "
+        "simulating generation, storage, and grid settlement under India's "
+        "real CERC deviation penalty regulation."
+    )
+    st.write("")
 
-        baseline_keys = ["S1 - PPA only", "S2 - Battery buffer", "S3 - Time windows"]
-        best = max(baseline_keys, key=lambda k: results[k].total("profit"))
-        worst_msg = (" -- the battery cannot pay for itself on DSM avoidance alone "
-                     "under a flat PPA. That gap is the case for the Scenario 5 optimizer."
-                     if best == "S1 - PPA only" else "")
-        st.info(f"**Best baseline today: {best}** at "
-                f"{INR(results[best].total('profit'))}/day{worst_msg}")
+    def scenario_card(name, r, compare_to=None, badge=None, badge_kind="info",
+                      live_attempt=None):
+        with st.container(border=True):
+            st.markdown(f"**{name}**")
+            if badge:
+                (st.success if badge_kind == "good" else
+                 st.warning if badge_kind == "warn" else st.caption)(badge)
+            dsm_net = r.total("dsm_receivable") - r.total("dsm_payable")
+            df = pd.DataFrame({
+                "Line item": ["PPA revenue", "DSM net", "Degradation", "O&M"],
+                "Amount (Rs)": [r.total("ppa_revenue"), dsm_net,
+                               -r.total("degradation"), -r.total("om")],
+            })
+            st.dataframe(df.style.format({"Amount (Rs)": "{:,.0f}"}),
+                        hide_index=True, use_container_width=True, height=175)
+            delta = f"{INR(r.total('profit') - compare_to)} vs S1" if compare_to is not None else None
+            dcolor = ("normal" if compare_to is None or r.total("profit") >= compare_to
+                     else "inverse")
+            mcol1, mcol2 = st.columns(2) if live_attempt is not None else (st, None)
+            mcol1.metric("Net profit / day (adopted)" if live_attempt is not None
+                        else "Net profit / day",
+                        INR(r.total("profit")), delta, delta_color=dcolor)
+            if live_attempt is not None:
+                mcol2.metric("If battery used (live)", INR(live_attempt),
+                            help="This number moves instantly with the degradation "
+                                 "and capacity sliders -- it's the fixed rule's raw "
+                                 "result, shown even while not adopted.")
+
+    p1 = r1.total("profit")
+    baseline_keys = ["S1 - PPA only", "S2 - Battery buffer", "S3 - Time windows"]
+    best = max(baseline_keys, key=lambda k: results[k].total("profit"))
+    worst_msg = (" -- the battery cannot pay for itself on DSM avoidance alone "
+                 "under a flat PPA. That gap is the case for the Scenario 5 optimizer."
+                 if best == "S1 - PPA only" else "")
+    st.info(f"**Best baseline today: {best}** at "
+            f"{INR(results[best].total('profit'))}/day{worst_msg}")
+
+    st.write("")
+    st.markdown('<div class="au-section">Click a scenario to see its full '
+               'breakdown and day profile</div>', unsafe_allow_html=True)
+    scenario_tabs = st.tabs(list(results))
+    for tab, (name, r) in zip(scenario_tabs, results.items()):
+        with tab:
+            if name == "S3 - Time windows":
+                if battery_deployed:
+                    s3_badge = (f"Battery DEPLOYED: earns Rs {r3_raw.total('profit'):,.0f} "
+                              f"vs Rs {p1:,.0f} without it -- DSM savings cover the wear cost.")
+                    s3_kind = "good"
+                else:
+                    s3_badge = (f"Battery HELD BACK: the fixed rule would only earn "
+                              f"Rs {r3_raw.total('profit'):,.0f}, worse than Rs {p1:,.0f} "
+                              f"without it -- so the battery isn't used today.")
+                    s3_kind = "warn"
+                scenario_card(name, r, compare_to=p1, badge=s3_badge,
+                             badge_kind=s3_kind, live_attempt=r3_raw.total("profit"))
+            elif name == "S1 - PPA only":
+                scenario_card(name, r)
+            else:
+                scenario_card(name, r, compare_to=p1)
+
+            st.write("")
+            fig = go.Figure()
+            fig.add_scatter(x=hours, y=[m * 4 for m in
+                            [row.actual_gen_mwh for row in r.rows]],
+                            name="Actual gen (MW)", line=dict(color="#F59E0B", width=2),
+                            fill="tozeroy", fillcolor="rgba(245,158,11,.10)")
+            fig.add_scatter(x=hours, y=[row.scheduled_mwh * 4 for row in r.rows],
+                            name="Schedule (MW)",
+                            line=dict(color=INK, width=1.6, dash="dash"))
+            fig.add_scatter(x=hours, y=[row.delivered_mwh * 4 for row in r.rows],
+                            name="Delivered (MW)", line=dict(color=BLUE, width=1.6))
+            soc = [row.soc_mwh for row in r.rows]
+            if any(s is not None for s in soc):
+                fig.add_scatter(x=hours, y=[s / 4 if s else 0 for s in soc],
+                                name="SoC (MWh/4)",
+                                line=dict(color=GREEN, width=2),
+                                fill="tozeroy", fillcolor="rgba(63,174,73,.10)")
+            fig.update_layout(height=340, margin=dict(l=10, r=10, t=10, b=10),
+                              legend=dict(orientation="h", y=1.1),
+                              xaxis_title="Hour of day", yaxis_title="MW")
+            st.plotly_chart(fig, use_container_width=True,
+                           key=f"dayprofile_{name}")
 
     st.write("")
     if r5 is not None:
@@ -509,33 +731,6 @@ with tab_sim:
         st.caption(f"Optimizer unavailable this run: {optimizer_error}")
 
     st.write("")
-    st.markdown('<div class="au-section">Day profile -- schedule vs delivered</div>',
-               unsafe_allow_html=True)
-    tabs = st.tabs(list(results))
-    for tab, (name, r) in zip(tabs, results.items()):
-        with tab, st.container(border=True):
-            fig = go.Figure()
-            fig.add_scatter(x=hours, y=[m * 4 for m in
-                            [row.actual_gen_mwh for row in r.rows]],
-                            name="Actual gen (MW)", line=dict(color="#F59E0B", width=2),
-                            fill="tozeroy", fillcolor="rgba(245,158,11,.10)")
-            fig.add_scatter(x=hours, y=[row.scheduled_mwh * 4 for row in r.rows],
-                            name="Schedule (MW)",
-                            line=dict(color=INK, width=1.6, dash="dash"))
-            fig.add_scatter(x=hours, y=[row.delivered_mwh * 4 for row in r.rows],
-                            name="Delivered (MW)", line=dict(color=BLUE, width=1.6))
-            soc = [row.soc_mwh for row in r.rows]
-            if any(s is not None for s in soc):
-                fig.add_scatter(x=hours, y=[s / 4 if s else 0 for s in soc],
-                                name="SoC (MWh/4)",
-                                line=dict(color=GREEN, width=2),
-                                fill="tozeroy", fillcolor="rgba(63,174,73,.10)")
-            fig.update_layout(height=340, margin=dict(l=10, r=10, t=10, b=10),
-                              legend=dict(orientation="h", y=1.1),
-                              xaxis_title="Hour of day", yaxis_title="MW")
-            st.plotly_chart(fig, use_container_width=True)
-
-    st.write("")
     st.markdown('<div class="au-section">Daily P&L decomposition</div>', unsafe_allow_html=True)
     names = list(results)
     with st.container(border=True):
@@ -557,7 +752,7 @@ with tab_sim:
         fig.update_layout(barmode="relative", height=320,
                           margin=dict(l=10, r=10, t=10, b=10),
                           legend=dict(orientation="h", y=1.12))
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True, key="pl_decomposition")
 
         df = pd.DataFrame({
             "Scenario": names,
@@ -599,8 +794,8 @@ with tab_sim:
         pen1 = r1.total("dsm_penalty")
         gross1 = max(r1.total("ppa_revenue"), 1.0)
         lines = [
-            f"On this weather day, {err}% forecast error cost the plant "
-            f"Rs {pen1:,.0f} in true DSM penalty under S1 -- "
+            f"On this weather day, a {err}% Actual-vs-Scheduled deviation cost the "
+            f"plant Rs {pen1:,.0f} in true DSM penalty under S1 -- "
             f"{100 * pen1 / gross1:.1f}% of gross PPA revenue."
         ]
         if p2 < p1:
@@ -613,7 +808,8 @@ with tab_sim:
         else:
             lines.append(
                 f"Unusually, S2 beats S1 by Rs {p2 - p1:,.0f} today -- cheap degradation "
-                f"(Rs {deg:.2f}/kWh) and heavy forecast error make pure buffering pay."
+                f"(Rs {deg:.2f}/kWh) and a large Actual-vs-Scheduled gap make pure "
+                f"buffering pay."
             )
         if p3 >= p1:
             lines.append(
@@ -664,7 +860,7 @@ with tab_tech:
     st.markdown('<div class="au-section">System diagram -- interactive 3D</div>',
                unsafe_allow_html=True)
     with st.container(border=True):
-        st.plotly_chart(build_3d_diagram(), use_container_width=True)
+        st.plotly_chart(build_3d_diagram(), use_container_width=True, key="diagram_3d")
         st.caption("Drag to rotate, scroll to zoom. Upper plane: physical "
                   "power flow (Solar to Grid, BESS buffering). Lower plane: "
                   "commercial settlement flow (Forecast to Profit/Loss), "
