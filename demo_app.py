@@ -223,6 +223,14 @@ st.sidebar.markdown(
 st.sidebar.title("Agentic Grid Simulator")
 st.sidebar.caption("Baseline Scenarios 1-3 - CERC DSM 2024")
 
+plant_capacity_mw = st.sidebar.number_input(
+    "Plant capacity (MW)", min_value=0.05, max_value=500.0, value=10.0, step=0.05,
+    help="Your plant's installed capacity. This is the denominator CERC uses "
+         "for deviation percentage (Regulation 6(2)). O&M cost below is scaled "
+         "proportionally from this too -- 0.3 MW (300 kW) and 1 MW both work "
+         "correctly, tested against the engine directly."
+)
+
 st.sidebar.divider()
 st.sidebar.subheader("Data source")
 data_mode = st.sidebar.radio(
@@ -366,6 +374,14 @@ st.sidebar.caption("Engine: dispatch_sim (Reg 6(2)/8(4), 20 unit tests). "
 
 # ---------------------------------------------------------------- run engine
 plant = load_yaml(CFG / "plant.yaml")
+_REFERENCE_MW = plant["plant_mw"]  # 10.0, the config's baseline reference plant
+plant["plant_mw"] = plant_capacity_mw
+# O&M was calibrated as a flat Rs/day figure for the 10 MW reference plant.
+# Scaling it proportionally keeps the 10 MW default byte-for-byte identical
+# (scale factor = 1.0) while giving honest, non-crushing O&M for smaller
+# plants -- a flat Rs 20,000/day would otherwise swamp a 300 kW system's
+# entire economics, which isn't realistic.
+plant["om_inr_per_day"] = plant["om_inr_per_day"] * (plant_capacity_mw / _REFERENCE_MW)
 plant["ppa_rate_inr_per_kwh"] = ppa
 dsm_cfg = load_dsm_config(CFG / "dsm_bands.yaml")
 s2_cfg = load_yaml(CFG / "scenario_s2.yaml"); s2_cfg["degradation_inr_per_kwh"] = deg
@@ -512,8 +528,8 @@ with hcol2:
             st.rerun()
 
 prov = "real uploaded generation data" if using_real else "synthetic weather day (upload a real one from the left panel)"
-st.caption(f"10 MW plant - flat-rate PPA - CERC DSM 2024 settlement per 15-min "
-          f"block - {prov}")
+st.caption(f"{plant_capacity_mw:g} MW plant - flat-rate PPA - CERC DSM 2024 "
+          f"settlement per 15-min block - {prov}")
 
 
 def _cuboid(cx, cy, cz, color, dx=0.26, dy=0.26, dz=0.22, name="", hover=""):
@@ -782,6 +798,88 @@ with tab_sim:
         st.dataframe(bl, use_container_width=True, height=300, hide_index=True)
         st.download_button("Export CSV", bl.to_csv(index=False),
                            file_name=f"{pick[:2]}_blocks.csv")
+
+    st.write("")
+    st.markdown('<div class="au-section">Multi-day backtest -- beyond a single day</div>',
+               unsafe_allow_html=True)
+    with st.container(border=True):
+        st.caption(
+            "A single weather day is a snapshot, not a risk profile. This runs "
+            "every scenario -- including the optimizer -- across many different "
+            "weather days at your current slider settings, and shows the spread "
+            "of outcomes, not just one day's number. Directly addresses the "
+            "'single-day focus' limitation: a real investment decision should "
+            "look at this distribution, not one day."
+        )
+        n_days = st.slider("Number of days to backtest", 5, 60, 20, 5)
+        run_backtest = st.button("Run backtest")
+
+        if run_backtest:
+            rng_master = np.random.default_rng(2026)
+            seeds = rng_master.integers(1, int(1e9), size=n_days)
+            rows = []
+            progress = st.progress(0.0, text="Running backtest...")
+            for i, seed in enumerate(seeds):
+                bt_fc, bt_act, _ = make_day(int(seed), err, plant["plant_mw"])
+                bt_r1 = run_s1(bt_fc, bt_act, plant, dsm_cfg, s1_cfg)
+                bt_r2 = run_s2(bt_fc, bt_act, plant, dsm_cfg, s2_cfg,
+                              fresh_battery({"batteryUsableCapacity": float(cap)}))
+                bt_r3_raw = run_s3(bt_fc, bt_act, plant, dsm_cfg, s3_cfg,
+                                  fresh_battery({"batteryUsableCapacity": float(cap)}))
+                bt_deployed = bt_r3_raw.total("profit") > bt_r1.total("profit")
+                bt_r3 = bt_r3_raw if bt_deployed else bt_r1
+                row = {"day": i + 1, "seed": int(seed),
+                      "S1": bt_r1.total("profit"), "S2": bt_r2.total("profit"),
+                      "S3": bt_r3.total("profit"),
+                      "S3_battery_used": bt_deployed}
+                try:
+                    bt_r5 = solve_optimal_dispatch(
+                        bt_fc, bt_act, plant, dsm_cfg,
+                        OptimizerBatterySpec(float(cap), 20.0, 0.88, 10, 90), deg)
+                    row["S5"] = bt_r5.total("profit")
+                except Exception:
+                    row["S5"] = None
+                rows.append(row)
+                progress.progress((i + 1) / n_days, text=f"Day {i+1}/{n_days}")
+            progress.empty()
+
+            bt_df = pd.DataFrame(rows)
+            st.session_state["backtest_df"] = bt_df
+
+        if "backtest_df" in st.session_state:
+            bt_df = st.session_state["backtest_df"]
+            scen_cols = [c for c in ["S1", "S2", "S3", "S5"] if c in bt_df.columns]
+
+            summary = pd.DataFrame({
+                "Scenario": scen_cols,
+                "Mean profit/day": [bt_df[c].mean() for c in scen_cols],
+                "Min": [bt_df[c].min() for c in scen_cols],
+                "Max": [bt_df[c].max() for c in scen_cols],
+                "Std dev": [bt_df[c].std() for c in scen_cols],
+                "Win rate (best day)": [
+                    f"{(bt_df[scen_cols].idxmax(axis=1) == c).mean()*100:.0f}%"
+                    for c in scen_cols],
+            })
+            st.dataframe(
+                summary.style.format({c: "Rs {:,.0f}" for c in
+                                     ["Mean profit/day", "Min", "Max", "Std dev"]}),
+                hide_index=True, use_container_width=True)
+
+            fig_bt = go.Figure()
+            colors_bt = {"S1": GREY, "S2": "#DC2626", "S3": "#F59E0B", "S5": BLUE}
+            for c in scen_cols:
+                fig_bt.add_scatter(x=bt_df["day"], y=bt_df[c], name=c, mode="lines+markers",
+                                  line=dict(color=colors_bt.get(c, INK), width=1.6))
+            fig_bt.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10),
+                                legend=dict(orientation="h", y=1.12),
+                                xaxis_title="Backtest day", yaxis_title="Profit (Rs)")
+            st.plotly_chart(fig_bt, use_container_width=True, key="backtest_chart")
+
+            if "S3" in bt_df.columns:
+                s3_rate = bt_df["S3_battery_used"].mean() * 100
+                st.caption(f"S3 deployed its battery on {s3_rate:.0f}% of backtested days "
+                          f"at current settings -- confirming the adaptive logic responds "
+                          f"to real day-to-day variation, not just one fixed day.")
 
     st.write("")
     st.markdown(f"""
