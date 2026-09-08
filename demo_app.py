@@ -703,27 +703,62 @@ with tab_sim:
                 scenario_card(name, r, compare_to=p1)
 
             st.write("")
+            sched_mw = [row.scheduled_mwh * 4 for row in r.rows]
+            deliv_mw = [row.delivered_mwh * 4 for row in r.rows]
+            actual_mw_list = [row.actual_gen_mwh * 4 for row in r.rows]
+
             fig = go.Figure()
-            fig.add_scatter(x=hours, y=[m * 4 for m in
-                            [row.actual_gen_mwh for row in r.rows]],
+            fig.add_scatter(x=hours, y=actual_mw_list,
                             name="Actual gen (MW)", line=dict(color="#F59E0B", width=2),
-                            fill="tozeroy", fillcolor="rgba(245,158,11,.10)")
-            fig.add_scatter(x=hours, y=[row.scheduled_mwh * 4 for row in r.rows],
-                            name="Schedule (MW)",
-                            line=dict(color=INK, width=1.6, dash="dash"))
-            fig.add_scatter(x=hours, y=[row.delivered_mwh * 4 for row in r.rows],
-                            name="Delivered (MW)", line=dict(color=BLUE, width=1.6))
+                            fill="tozeroy", fillcolor="rgba(245,158,11,.08)")
+            # shaded gap between schedule and delivered -- makes the
+            # "deviation = money" story visible as a colored region
+            # instead of something the eye has to estimate between lines
+            fig.add_scatter(x=hours, y=sched_mw, name="Schedule (MW)",
+                            line=dict(color=INK, width=1.8, dash="dash"))
+            fig.add_scatter(x=hours, y=deliv_mw, name="Delivered (MW)",
+                            line=dict(color=BLUE, width=2.2),
+                            fill="tonexty", fillcolor="rgba(220,38,38,.14)")
+
             soc = [row.soc_mwh for row in r.rows]
             if any(s is not None for s in soc):
                 fig.add_scatter(x=hours, y=[s / 4 if s else 0 for s in soc],
                                 name="SoC (MWh/4)",
                                 line=dict(color=GREEN, width=2),
                                 fill="tozeroy", fillcolor="rgba(63,174,73,.10)")
-            fig.update_layout(height=340, margin=dict(l=10, r=10, t=10, b=10),
-                              legend=dict(orientation="h", y=1.1),
-                              xaxis_title="Hour of day", yaxis_title="MW")
+
+            # find and mark the single worst deviation block, with its real
+            # rupee penalty, so the chart states the story directly instead
+            # of leaving it to be inferred
+            worst_idx = max(range(len(r.rows)),
+                           key=lambda i: abs(r.rows[i].deviation_mwh))
+            worst_row = r.rows[worst_idx]
+            if abs(worst_row.deviation_mwh) > 0.001:
+                fig.add_scatter(
+                    x=[hours[worst_idx]], y=[deliv_mw[worst_idx]],
+                    mode="markers", marker=dict(size=13, color="#DC2626",
+                    symbol="circle", line=dict(color="white", width=2)),
+                    name="Largest deviation", showlegend=False,
+                    hovertext=[f"Gap: {worst_row.deviation_mwh:+.2f} MWh this block "
+                              f"-> Rs {worst_row.dsm_penalty:,.0f} penalty"],
+                    hoverinfo="text")
+                fig.add_annotation(
+                    x=hours[worst_idx], y=deliv_mw[worst_idx],
+                    text=f"Largest gap: {worst_row.deviation_mwh:+.2f} MWh<br>"
+                         f"-> Rs {worst_row.dsm_penalty:,.0f} penalty",
+                    showarrow=True, arrowhead=2, arrowcolor="#DC2626",
+                    ax=0, ay=-42, bgcolor="white", bordercolor="#DC2626",
+                    borderwidth=1.3, borderpad=5, font=dict(size=11, color="#DC2626"))
+
+            fig.update_layout(height=360, margin=dict(l=10, r=10, t=10, b=10),
+                              legend=dict(orientation="h", y=1.12),
+                              xaxis_title="Hour of day", yaxis_title="MW",
+                              hovermode="x unified")
             st.plotly_chart(fig, use_container_width=True,
                            key=f"dayprofile_{name}")
+            st.caption("Shaded red = the gap between promise and delivery -- "
+                      "this is what CERC prices. The marked point is the "
+                      "single worst block of the day, with its real penalty.")
 
     st.write("")
     if r5 is not None:
@@ -747,28 +782,34 @@ with tab_sim:
         st.caption(f"Optimizer unavailable this run: {optimizer_error}")
 
     st.write("")
-    st.markdown('<div class="au-section">Daily P&L decomposition</div>', unsafe_allow_html=True)
+    st.markdown('<div class="au-section">Where the money goes -- % of gross revenue</div>',
+               unsafe_allow_html=True)
     names = list(results)
     with st.container(border=True):
+        st.caption("Each bar is one scenario's own gross PPA revenue, normalized "
+                  "to 100% -- showing what SHARE is kept as profit versus lost to "
+                  "DSM, degradation, and O&M. For exact rupee amounts, see the "
+                  "table below; this answers a different question: which "
+                  "scenario keeps the biggest slice of its own revenue.")
+        profit_pct, dsm_pct, deg_pct, om_pct = [], [], [], []
+        for r in results.values():
+            gross = max(r.total("ppa_revenue"), 1.0)
+            dsm_net = r.total("dsm_receivable") - r.total("dsm_payable")
+            profit_pct.append(r.total("profit") / gross * 100)
+            dsm_pct.append(-dsm_net / gross * 100)
+            deg_pct.append(r.total("degradation") / gross * 100)
+            om_pct.append(r.total("om") / gross * 100)
+
         fig = go.Figure()
-        fig.add_bar(name="PPA revenue", x=names,
-                    y=[r.total("ppa_revenue") for r in results.values()],
-                    marker_color=INK)
-        fig.add_bar(name="DSM receivable", x=names,
-                    y=[r.total("dsm_receivable") for r in results.values()],
-                    marker_color=BLUE)
-        fig.add_bar(name="DSM payable", x=names,
-                    y=[-r.total("dsm_payable") for r in results.values()],
-                    marker_color="#DC2626")
-        fig.add_bar(name="Degradation", x=names,
-                    y=[-r.total("degradation") for r in results.values()],
-                    marker_color="#F59E0B")
-        fig.add_bar(name="O&M", x=names,
-                    y=[-r.total("om") for r in results.values()], marker_color=GREY)
-        fig.update_layout(barmode="relative", height=320,
+        fig.add_bar(name="Net profit kept", x=names, y=profit_pct, marker_color=GREEN)
+        fig.add_bar(name="DSM cost", x=names, y=dsm_pct, marker_color="#DC2626")
+        fig.add_bar(name="Degradation cost", x=names, y=deg_pct, marker_color="#F59E0B")
+        fig.add_bar(name="O&M cost", x=names, y=om_pct, marker_color=GREY)
+        fig.update_layout(barmode="stack", height=320,
                           margin=dict(l=10, r=10, t=10, b=10),
-                          legend=dict(orientation="h", y=1.12))
-        st.plotly_chart(fig, use_container_width=True, key="pl_decomposition")
+                          legend=dict(orientation="h", y=1.12),
+                          yaxis_title="% of gross PPA revenue")
+        st.plotly_chart(fig, use_container_width=True, key="pl_composition")
 
         df = pd.DataFrame({
             "Scenario": names,
