@@ -691,15 +691,16 @@ with tab_sim:
         with tab:
             if name == "S3 - Time windows":
                 if battery_deployed:
-                    s3_badge = (f"Battery DEPLOYED: earns Rs {r3_raw.total('profit'):,.0f} "
-                              f"vs Rs {p1:,.0f} without it -- DSM savings cover the wear cost.")
+                    s3_badge = (f"Battery DEPLOYED: this strategy earns Rs "
+                              f"{r3_raw.total('profit'):,.0f}/day -- DSM savings cover "
+                              f"the wear cost.")
                     s3_kind = "good"
                 else:
-                    s3_badge = (f"Battery HELD BACK: the fixed rule would only earn "
-                              f"Rs {r3_raw.total('profit'):,.0f}, worse than Rs {p1:,.0f} "
-                              f"without it -- so the battery isn't used today.")
+                    s3_badge = (f"Battery HELD BACK: this strategy's own numbers earn "
+                              f"only Rs {r3_raw.total('profit'):,.0f}/day, not enough to "
+                              f"justify running the battery today, so it isn't used.")
                     s3_kind = "warn"
-                scenario_card(name, r, compare_to=p1, badge=s3_badge,
+                scenario_card(name, r, compare_to=None, badge=s3_badge,
                              badge_kind=s3_kind, live_attempt=r3_raw.total("profit"),
                              breakdown_r=r3_raw)
             elif name == "S1 - PPA only":
@@ -708,9 +709,14 @@ with tab_sim:
                 scenario_card(name, r, compare_to=p1)
 
             st.write("")
-            sched_mw = [row.scheduled_mwh * 4 for row in r.rows]
-            deliv_mw = [row.delivered_mwh * 4 for row in r.rows]
-            actual_mw_list = [row.actual_gen_mwh * 4 for row in r.rows]
+            # chart_r: S3's chart must always show its OWN battery physics --
+            # even when held back and r==r1 for the adopted numbers, the
+            # strategy still genuinely charges/discharges when run, and that
+            # real SoC curve is what the chart should show, not a flat line.
+            chart_r = r3_raw if name == "S3 - Time windows" else r
+            sched_mw = [row.scheduled_mwh * 4 for row in chart_r.rows]
+            deliv_mw = [row.delivered_mwh * 4 for row in chart_r.rows]
+            actual_mw_list = [row.actual_gen_mwh * 4 for row in chart_r.rows]
 
             fig = go.Figure()
             fig.add_scatter(x=hours, y=actual_mw_list,
@@ -725,7 +731,7 @@ with tab_sim:
                             line=dict(color=BLUE, width=2.2),
                             fill="tonexty", fillcolor="rgba(220,38,38,.14)")
 
-            soc = [row.soc_mwh for row in r.rows]
+            soc = [row.soc_mwh for row in chart_r.rows]
             if any(s is not None for s in soc):
                 fig.add_scatter(x=hours, y=[s / 4 if s else 0 for s in soc],
                                 name="SoC (MWh/4)",
@@ -735,9 +741,9 @@ with tab_sim:
             # find and mark the single worst deviation block, with its real
             # rupee penalty, so the chart states the story directly instead
             # of leaving it to be inferred
-            worst_idx = max(range(len(r.rows)),
-                           key=lambda i: abs(r.rows[i].deviation_mwh))
-            worst_row = r.rows[worst_idx]
+            worst_idx = max(range(len(chart_r.rows)),
+                           key=lambda i: abs(chart_r.rows[i].deviation_mwh))
+            worst_row = chart_r.rows[worst_idx]
             if abs(worst_row.deviation_mwh) > 0.001:
                 fig.add_scatter(
                     x=[hours[worst_idx]], y=[deliv_mw[worst_idx]],
@@ -761,9 +767,15 @@ with tab_sim:
                               hovermode="x unified")
             st.plotly_chart(fig, use_container_width=True,
                            key=f"dayprofile_{name}")
-            st.caption("Shaded red = the gap between promise and delivery -- "
-                      "this is what CERC prices. The marked point is the "
-                      "single worst block of the day, with its real penalty.")
+            if name == "S3 - Time windows":
+                st.caption("Shaded red = the gap between promise and delivery. "
+                          "The green SoC line always shows this strategy's own "
+                          "charge/discharge physics, whether or not it's the one "
+                          "actually adopted today -- see the badge above for that.")
+            else:
+                st.caption("Shaded red = the gap between promise and delivery -- "
+                          "this is what CERC prices. The marked point is the "
+                          "single worst block of the day, with its real penalty.")
 
     st.write("")
     if r5 is not None:
@@ -955,20 +967,20 @@ with tab_sim:
                 f"(Rs {deg:.2f}/kWh) and a large Actual-vs-Scheduled gap make pure "
                 f"buffering pay."
             )
-        if p3 > p1:
+        if battery_deployed:
             lines.append(
-                f"S3's fixed rule overtakes S1 by Rs {p3 - p1:,.0f}: at this degradation "
-                f"cost, timed shifting plus deviation buffering finally covers its own "
-                f"tolls -- so the battery is deployed today."
+                f"S3's fixed rule (charge at peak sun, discharge in the evening) earns "
+                f"Rs {p3:,.0f}/day on its own economics: at this degradation cost, timed "
+                f"shifting plus deviation buffering covers its own wear cost -- so the "
+                f"battery is deployed today."
             )
         else:
-            vs2 = f"recovers Rs {p3 - p2:,.0f} versus S2 but " if p3 > p2 else ""
             lines.append(
-                f"S3's fixed rule {vs2}still trails S1 by Rs {p1 - p3:,.0f} -- so the "
-                f"battery is held back today. Under a flat PPA there is no price spread "
-                f"to capture, and even at low degradation cost the battery's own "
-                f"round-trip efficiency loss (~12% per cycle) is often enough on its own "
-                f"to erase what little DSM saving timed shifting buys."
+                f"S3's fixed rule (charge at peak sun, discharge in the evening) earns "
+                f"only Rs {p3:,.0f}/day on its own economics -- not enough to justify "
+                f"running the battery today. Even at low degradation cost, the battery's "
+                f"own round-trip efficiency loss (~12% per cycle) is often enough on its "
+                f"own to erase what little DSM saving timed shifting buys."
             )
         if max(p2, p3) < p1:
             lines.append(
