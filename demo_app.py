@@ -933,8 +933,8 @@ with tab_sim:
     <span class="gi-title">Grid Intelligence</span></div>
     """, unsafe_allow_html=True)
 
-    def analyst(r1, r2, r3, deg, err, r5=None):
-        p1, p2, p3 = r1.total("profit"), r2.total("profit"), r3.total("profit")
+    def analyst(r1, r2, r3_raw, deg, err, r5=None):
+        p1, p2, p3 = r1.total("profit"), r2.total("profit"), r3_raw.total("profit")
         pen1 = r1.total("dsm_penalty")
         gross1 = max(r1.total("ppa_revenue"), 1.0)
         lines = [
@@ -955,28 +955,34 @@ with tab_sim:
                 f"(Rs {deg:.2f}/kWh) and a large Actual-vs-Scheduled gap make pure "
                 f"buffering pay."
             )
-        if p3 >= p1:
+        if p3 > p1:
             lines.append(
-                f"S3 overtakes S1 by Rs {p3 - p1:,.0f}: at this degradation cost, timed "
-                f"shifting plus deviation buffering finally covers its own tolls."
+                f"S3's fixed rule overtakes S1 by Rs {p3 - p1:,.0f}: at this degradation "
+                f"cost, timed shifting plus deviation buffering finally covers its own "
+                f"tolls -- so the battery is deployed today."
             )
         else:
             vs2 = f"recovers Rs {p3 - p2:,.0f} versus S2 but " if p3 > p2 else ""
             lines.append(
-                f"S3 {vs2}still trails S1 by Rs {p1 - p3:,.0f} -- under a flat PPA there "
-                f"is no price spread to capture, so timed shifting earns nothing it can bill."
+                f"S3's fixed rule {vs2}still trails S1 by Rs {p1 - p3:,.0f} -- so the "
+                f"battery is held back today. Under a flat PPA there is no price spread "
+                f"to capture, and even at low degradation cost the battery's own "
+                f"round-trip efficiency loss (~12% per cycle) is often enough on its own "
+                f"to erase what little DSM saving timed shifting buys."
             )
         if max(p2, p3) < p1:
             lines.append(
-                "Implication: with a single fixed price, no rule-based strategy beats "
-                "doing nothing. That gap is the quantified case for the Scenario 5 "
-                "optimizer and P2P merchant revenue."
+                "Implication: with a single fixed price, no rule-based strategy reliably "
+                "beats doing nothing -- driven jointly by degradation cost and the "
+                "battery's unavoidable round-trip efficiency loss, not degradation alone. "
+                "That gap is the quantified case for the Scenario 5 optimizer and P2P "
+                "merchant revenue."
             )
         else:
             lines.append(
-                "Implication: the battery verdict is driven almost entirely by the "
-                "degradation price -- confirming it with the battery team is the "
-                "single highest-value open item."
+                "Implication: the battery verdict is close today -- confirming the real "
+                "degradation price with the battery team is the single highest-value "
+                "open item."
             )
         if r5 is not None:
             best_baseline = max(p1, p2, p3)
@@ -996,7 +1002,7 @@ with tab_sim:
             time.sleep(delay)
 
     with st.container(border=True):
-        st.write_stream(_typed(analyst(r1, r2, r3, deg, err, r5)))
+        st.write_stream(_typed(analyst(r1, r2, r3_raw, deg, err, r5)))
 
 
 with tab_tech:
