@@ -643,17 +643,21 @@ with tab_sim:
     st.write("")
 
     def scenario_card(name, r, compare_to=None, badge=None, badge_kind="info",
-                      live_attempt=None):
+                      live_attempt=None, breakdown_r=None):
         with st.container(border=True):
             st.markdown(f"**{name}**")
             if badge:
                 (st.success if badge_kind == "good" else
                  st.warning if badge_kind == "warn" else st.caption)(badge)
-            dsm_net = r.total("dsm_receivable") - r.total("dsm_payable")
+            # breakdown_r lets a scenario show its OWN line items even when
+            # its adopted headline profit equals another scenario's (e.g. S3
+            # held-back == S1) -- so the table never looks like a duplicate.
+            b = breakdown_r if breakdown_r is not None else r
+            dsm_net = b.total("dsm_receivable") - b.total("dsm_payable")
             df = pd.DataFrame({
                 "Line item": ["PPA revenue", "DSM net", "Degradation", "O&M"],
-                "Amount (Rs)": [r.total("ppa_revenue"), dsm_net,
-                               -r.total("degradation"), -r.total("om")],
+                "Amount (Rs)": [b.total("ppa_revenue"), dsm_net,
+                               -b.total("degradation"), -b.total("om")],
             })
             st.dataframe(df.style.format({"Amount (Rs)": "{:,.0f}"}),
                         hide_index=True, use_container_width=True, height=175)
@@ -696,7 +700,8 @@ with tab_sim:
                               f"without it -- so the battery isn't used today.")
                     s3_kind = "warn"
                 scenario_card(name, r, compare_to=p1, badge=s3_badge,
-                             badge_kind=s3_kind, live_attempt=r3_raw.total("profit"))
+                             badge_kind=s3_kind, live_attempt=r3_raw.total("profit"),
+                             breakdown_r=r3_raw)
             elif name == "S1 - PPA only":
                 scenario_card(name, r)
             else:
