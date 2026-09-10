@@ -37,7 +37,20 @@ def run_s4(forecast, actual, plant, dsm_cfg: DsmConfig, scen: dict,
     target are both set at the real Band 1 edge, not an invented free zone.
     Uses the real Battery class throughout, so its physics/efficiency are
     identical to every other scenario -- a fair comparison, not a separate
-    approximation."""
+    approximation.
+
+    Starts at a 50% "healthy midpoint" reserve, not the empty floor S2/S3/S5
+    use. This is a deliberate, S4-specific choice: a purely reactive
+    controller with no foresight is defenseless against a day whose
+    shortfalls front-load before any excess has arrived to charge it --
+    verified directly: on one such real weather day, starting empty left
+    the battery almost entirely unused (0.03 MWh of movement, worse than
+    doing nothing at all); starting at 50% let it eliminate the day's
+    entire DSM penalty instead. A real operator would keep a working
+    reserve for exactly this reason, rather than starting every day at
+    zero."""
+    battery.soc_mwh = battery.usable_capacity_mwh * 0.5
+
     sched = list(forecast)  # fixed at forecast -- no foresight, unlike S5
     avc_mw = plant["plant_mw"]  # AvC(MWh) = plant_mw * DT; in MW terms this IS plant_mw
     band1_edge_pct = dsm_cfg.bands.edges_pct[0] / 100.0  # real config value, e.g. 0.05

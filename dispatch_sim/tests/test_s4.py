@@ -52,7 +52,11 @@ class TestS4ReactiveController:
         r4 = run_s4(forecast, actual, plant, dsm,
                    {"name": "S4", "degradation_inr_per_kwh": 2.5}, battery)
         assert abs(r4.rows[10].delivered_mwh - 4.8 * 0.25) < 1e-6
-        assert r4.rows[10].soc_mwh == 4.0  # battery untouched, still at floor
+        # battery untouched: stays at the 50% healthy-midpoint starting
+        # reserve (not the floor -- S4 deliberately starts here, unlike
+        # S2/S3/S5, so a reactive controller isn't defenseless against a
+        # shortfall-heavy day with no prior charging opportunity)
+        assert r4.rows[10].soc_mwh == 20.0
 
     def test_excess_beyond_band1_charges_to_the_real_edge(self):
         """A deviation beyond Band 1 should charge just enough to pull the
@@ -119,3 +123,27 @@ class TestS4ReactiveController:
         r4 = run_s4(forecast, actual, plant, dsm,
                    {"name": "S4", "degradation_inr_per_kwh": 2.5}, battery)
         assert abs(sum(row.profit for row in r4.rows) - r4.total("profit")) < 1e-6
+
+    def test_starts_with_a_healthy_reserve_not_empty(self):
+        """Regression guard for a real bug found tonight: a purely
+        reactive controller starting EMPTY is defenseless on a day whose
+        shortfalls front-load before any excess arrives to charge it --
+        verified directly on a real weather day, this left the battery
+        at just 0.03 MWh of total movement and made S4 WORSE than doing
+        nothing at all (profit -Rs 74 vs S1). Starting at a 50% reserve
+        fixed it completely (penalty eliminated, +Rs 42,590 vs S1 on
+        that same day). This test locks in the starting condition itself
+        so that fix can't silently regress."""
+        plant, dsm, battery = make_plant(), make_dsm(), make_battery()
+        # a day of ONLY shortfalls -- the worst case for a reactive
+        # controller, with zero opportunity to self-charge from excess
+        forecast = [5.0] * BLOCKS
+        actual = [3.0] * BLOCKS  # constant 2 MW shortfall, every block
+        r4 = run_s4(forecast, actual, plant, dsm,
+                   {"name": "S4", "degradation_inr_per_kwh": 2.5}, battery)
+        from dispatch_sim.runners.rules import run_s1
+        r1 = run_s1(forecast, actual, plant, dsm, {"name": "S1"})
+        assert r4.total("profit") > r1.total("profit"), (
+            "S4 must genuinely beat doing nothing on a pure-shortfall day -- "
+            "if this fails, the starting-reserve fix has regressed"
+        )
