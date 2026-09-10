@@ -895,6 +895,7 @@ with tab_sim:
             fig.update_layout(height=360, margin=dict(l=10, r=10, t=10, b=10),
                               legend=dict(orientation="h", y=1.12),
                               xaxis_title="Hour of day", yaxis_title="MW",
+                              xaxis=dict(range=[0, 24]),
                               yaxis2=dict(title="Battery charge (%)", overlaying="y",
                                         side="right", range=[0, 105],
                                         showgrid=False),
