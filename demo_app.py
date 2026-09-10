@@ -872,25 +872,7 @@ with tab_sim:
                     arrowcolor="#9CA3AF",
                     ax=0, ay=-42, bgcolor="#F9FAFB", bordercolor="#E5E7EB",
                     borderwidth=1, borderpad=6, font=dict(size=11, color="#374151"))
-            else:
-                # Zero deviation everywhere is a real, common result for the
-                # optimizer (perfect foresight -> schedule exactly matches
-                # generation -> zero DSM exposure, zero reason to touch the
-                # battery under a flat PPA). Without this note, an empty
-                # chart can look broken instead of looking like what it
-                # actually is: proof of compliance.
-                fig.add_annotation(
-                    x=hours[len(hours)//2], y=max(actual_mw_list) * 0.5 if actual_mw_list else 1,
-                    text="<b>Zero deviation achieved</b><br>Schedule exactly matches "
-                         "generation -- no DSM exposure, no reason to use the battery "
-                         "under a flat PPA. This is the optimum, not an empty chart.<br>"
-                         "<i>True at any Generation Deviation slider setting -- the "
-                         "optimizer sees the real outcome before scheduling, so its "
-                         "own deviation is always zero by design. The slider still "
-                         "raises the BASELINE scenarios' exposure (and therefore the "
-                         "uplift number) -- just never this chart.</i>",
-                    showarrow=False, bgcolor="#F0FDF4", bordercolor="#BBF7D0",
-                    borderwidth=1, borderpad=8, font=dict(size=10.5, color="#166534"))
+            zero_deviation_today = abs(worst_row.deviation_mwh) <= 0.001
 
             fig.update_layout(height=360, margin=dict(l=10, r=10, t=10, b=10),
                               legend=dict(orientation="h", y=1.12),
@@ -900,24 +882,40 @@ with tab_sim:
                                         side="right", range=[0, 105],
                                         showgrid=False),
                               hovermode="x unified")
+
+            if zero_deviation_today:
+                st.success(
+                    "**Zero deviation achieved.** Schedule exactly matches "
+                    "generation: no DSM exposure, and no reason to use the "
+                    "battery under a flat PPA. This holds at any Generation "
+                    "Deviation slider setting, since the optimizer sees the "
+                    "real outcome before scheduling and its own deviation is "
+                    "zero by design. The slider still raises the baseline "
+                    "scenarios' exposure, and therefore the uplift number, "
+                    "just never this chart."
+                )
+
             st.plotly_chart(fig, use_container_width=True,
                            key=f"dayprofile_{name}")
             if name == "S3 - Time windows":
-                st.caption("Yellow/orange/red bands around Schedule = the real "
-                          "CERC tiers (5/10/20% of Available Capacity) -- Band 1 "
-                          "is charged at 100% of tariff, not zero-penalty. Purple "
-                          "dotted line = the optimizer's own schedule, for direct "
-                          "comparison. Blue/orange bands mark this strategy's real "
-                          "CHARGING/DISCHARGING physics, whether or not it's "
-                          "actually adopted today (see the badge above).")
+                st.caption("Yellow, orange, and red bands around Schedule show "
+                          "the real CERC tiers (5%, 10%, and 20% of Available "
+                          "Capacity). Band 1 is charged at 100% of tariff, not "
+                          "zero-penalty. The purple dotted line is the "
+                          "optimizer's own schedule, shown for direct "
+                          "comparison. Blue and orange bands mark this "
+                          "strategy's real charging and discharging physics, "
+                          "whether or not it's actually adopted today (see "
+                          "the badge above).")
             else:
-                st.caption("Yellow/orange/red bands around Schedule = the real "
-                          "CERC tiers (5/10/20% of Available Capacity) -- Band 1 "
-                          "is charged at 100% of tariff, not zero-penalty. Purple "
-                          "dotted line = the optimizer's own schedule, for direct "
-                          "comparison. Blue/orange bands mark CHARGING and "
-                          "DISCHARGING. The marked point is the single worst "
-                          "block of the day, with its real penalty.")
+                st.caption("Yellow, orange, and red bands around Schedule show "
+                          "the real CERC tiers (5%, 10%, and 20% of Available "
+                          "Capacity). Band 1 is charged at 100% of tariff, not "
+                          "zero-penalty. The purple dotted line is the "
+                          "optimizer's own schedule, shown for direct "
+                          "comparison. Blue and orange bands mark charging "
+                          "and discharging. The marked point is the single "
+                          "worst block of the day, with its real penalty.")
 
     st.write("")
     if r5 is not None:
