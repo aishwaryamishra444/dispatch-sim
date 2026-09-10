@@ -784,7 +784,7 @@ with tab_sim:
             fig.add_scatter(x=hours, y=actual_mw_list,
                             name="Actual gen (MW)", line=dict(color="#F59E0B", width=2))
             fig.add_scatter(x=hours, y=sched_mw, name="Schedule (MW)",
-                            line=dict(color=INK, width=1.8, dash="dash"))
+                            line=dict(color=INK, width=2.0, dash="dash"))
             fig.add_scatter(x=hours, y=deliv_mw, name="Delivered (MW)",
                             line=dict(color=BLUE, width=2.2))
 
@@ -794,7 +794,7 @@ with tab_sim:
             if r5 is not None and name != "S5 - Optimizer":
                 r5_sched_mw = [row.scheduled_mwh * 4 for row in r5.rows]
                 fig.add_scatter(x=hours, y=r5_sched_mw, name="S5 Optimal Schedule",
-                               line=dict(color="#7C3AED", width=1.6, dash="dot"))
+                               line=dict(color="#9333EA", width=2.2, dash="dot"))
 
             soc = [row.soc_mwh for row in chart_r.rows]
             has_battery = any(s is not None for s in soc)
@@ -842,11 +842,12 @@ with tab_sim:
                                      line_width=0, layer="below")
                         fig.add_annotation(x=(s + e + DT) / 2, y=label_y,
                                           text=f"<b>{label}</b>", showarrow=False,
-                                          font=dict(size=11, color=color),
-                                          yref="y2")
+                                          font=dict(size=10, color=color),
+                                          opacity=0.75, yref="y2 domain",
+                                          yanchor="top")
 
-                _shade_regions(charge_hrs, "#2563EB", "CHARGING", 97)
-                _shade_regions(discharge_hrs, "#F97316", "DISCHARGING", 97)
+                _shade_regions(charge_hrs, "#2563EB", "CHARGING", 0.998)
+                _shade_regions(discharge_hrs, "#F97316", "DISCHARGING", 0.998)
 
             # find and mark the single worst deviation block, with its real
             # rupee penalty, so the chart states the story directly instead
@@ -865,11 +866,12 @@ with tab_sim:
                     hoverinfo="text")
                 fig.add_annotation(
                     x=hours[worst_idx], y=deliv_mw[worst_idx],
-                    text=f"Largest gap: {worst_row.deviation_mwh:+.2f} MWh<br>"
+                    text=f"<b>Largest gap:</b> {worst_row.deviation_mwh:+.2f} MWh<br>"
                          f"-> Rs {worst_row.dsm_penalty:,.0f} penalty",
-                    showarrow=True, arrowhead=2, arrowcolor="#DC2626",
-                    ax=0, ay=-42, bgcolor="white", bordercolor="#DC2626",
-                    borderwidth=1.3, borderpad=5, font=dict(size=11, color="#DC2626"))
+                    showarrow=True, arrowhead=2, arrowsize=0.8, arrowwidth=1.3,
+                    arrowcolor="#9CA3AF",
+                    ax=0, ay=-42, bgcolor="#F9FAFB", bordercolor="#E5E7EB",
+                    borderwidth=1, borderpad=6, font=dict(size=11, color="#374151"))
 
             fig.update_layout(height=360, margin=dict(l=10, r=10, t=10, b=10),
                               legend=dict(orientation="h", y=1.12),
