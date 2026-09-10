@@ -13,6 +13,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import streamlit as st
 import streamlit.components.v1 as components
 
@@ -752,7 +753,10 @@ with tab_sim:
             deliv_mw = [row.delivered_mwh * 4 for row in chart_r.rows]
             actual_mw_list = [row.actual_gen_mwh * 4 for row in chart_r.rows]
 
-            fig = go.Figure()
+            fig = make_subplots(
+                rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.08,
+                row_heights=[0.65, 0.35]
+            )
 
             # Real tiered DSM tolerance corridor around the schedule line --
             # using the actual CERC band edges from dsm_bands.yaml (5/10/20%
@@ -770,23 +774,25 @@ with tab_sim:
                 upper = [s + edge for s in sched_mw]
                 lower = [max(0, s - edge) for s in sched_mw]
                 fig.add_scatter(x=hours, y=upper, mode="lines", line=dict(width=0),
-                               showlegend=False, hoverinfo="skip")
+                               showlegend=False, hoverinfo="skip", row=1, col=1)
                 fig.add_scatter(x=hours, y=prev_upper, mode="lines", line=dict(width=0),
                                fill="tonexty", fillcolor=color, showlegend=False,
-                               hoverinfo="skip")
+                               hoverinfo="skip", row=1, col=1)
                 fig.add_scatter(x=hours, y=lower, mode="lines", line=dict(width=0),
-                               showlegend=False, hoverinfo="skip")
+                               showlegend=False, hoverinfo="skip", row=1, col=1)
                 fig.add_scatter(x=hours, y=prev_lower, mode="lines", line=dict(width=0),
                                fill="tonexty", fillcolor=color, showlegend=False,
-                               hoverinfo="skip", name=blabel)
+                               hoverinfo="skip", name=blabel, row=1, col=1)
                 prev_upper, prev_lower = upper, lower
 
             fig.add_scatter(x=hours, y=actual_mw_list,
-                            name="Actual gen (MW)", line=dict(color="#F59E0B", width=2))
+                            name="Actual gen (MW)", line=dict(color="#F59E0B", width=2),
+                            row=1, col=1)
             fig.add_scatter(x=hours, y=sched_mw, name="Schedule (MW)",
-                            line=dict(color=INK, width=2.0, dash="dash"))
+                            line=dict(color=INK, width=2.0, dash="dash"),
+                            row=1, col=1)
             fig.add_scatter(x=hours, y=deliv_mw, name="Delivered (MW)",
-                            line=dict(color=BLUE, width=2.2))
+                            line=dict(color=BLUE, width=2.2), row=1, col=1)
 
             # "Optimal vs Base" overlay -- superimpose S5's own optimal
             # schedule directly on top of this baseline's chart, so the
@@ -794,8 +800,38 @@ with tab_sim:
             if r5 is not None and name != "S5 - Optimizer":
                 r5_sched_mw = [row.scheduled_mwh * 4 for row in r5.rows]
                 fig.add_scatter(x=hours, y=r5_sched_mw, name="S5 Optimal Schedule",
-                               line=dict(color="#9333EA", width=2.2, dash="dot"))
+                               line=dict(color="#9333EA", width=2.2, dash="dot"),
+                               row=1, col=1)
 
+            # find and mark the single worst deviation block, with its real
+            # rupee penalty, so the chart states the story directly instead
+            # of leaving it to be inferred -- this belongs on the power
+            # panel (Row 1), since it's about delivery vs schedule, not
+            # battery state.
+            worst_idx = max(range(len(chart_r.rows)),
+                           key=lambda i: abs(chart_r.rows[i].deviation_mwh))
+            worst_row = chart_r.rows[worst_idx]
+            if abs(worst_row.deviation_mwh) > 0.001:
+                fig.add_scatter(
+                    x=[hours[worst_idx]], y=[deliv_mw[worst_idx]],
+                    mode="markers", marker=dict(size=13, color="#DC2626",
+                    symbol="circle", line=dict(color="white", width=2)),
+                    name="Largest deviation", showlegend=False,
+                    hovertext=[f"Gap: {worst_row.deviation_mwh:+.2f} MWh this block "
+                              f"-> Rs {worst_row.dsm_penalty:,.0f} penalty"],
+                    hoverinfo="text", row=1, col=1)
+                fig.add_annotation(
+                    x=hours[worst_idx], y=deliv_mw[worst_idx],
+                    text=f"<b>Largest gap:</b> {worst_row.deviation_mwh:+.2f} MWh<br>"
+                         f"-> Rs {worst_row.dsm_penalty:,.0f} penalty",
+                    showarrow=True, arrowhead=2, arrowsize=0.8, arrowwidth=1.3,
+                    arrowcolor="#9CA3AF",
+                    ax=0, ay=-42, bgcolor="#F9FAFB", bordercolor="#E5E7EB",
+                    borderwidth=1, borderpad=6, font=dict(size=11, color="#374151"),
+                    row=1, col=1)
+            zero_deviation_today = abs(worst_row.deviation_mwh) <= 0.001
+
+            # ----------------- ROW 2: battery physics, own lane -----------
             soc = [row.soc_mwh for row in chart_r.rows]
             has_battery = any(s is not None for s in soc)
             if has_battery:
@@ -803,7 +839,7 @@ with tab_sim:
                 fig.add_scatter(x=hours, y=soc_pct, name="Battery charge (%)",
                                 line=dict(color=GREEN, width=2.6),
                                 fill="tozeroy", fillcolor="rgba(63,174,73,.08)",
-                                yaxis="y2")
+                                row=2, col=1)
 
                 # Detect charging vs discharging from the SoC trajectory's
                 # DOMINANT trend, not raw per-block deltas -- deviation
@@ -822,7 +858,8 @@ with tab_sim:
 
                 def _shade_regions(times, color, label, label_y):
                     """Group contiguous hours into shaded background bands
-                    with one clear text label per contiguous region."""
+                    with one clear text label per contiguous region, on the
+                    battery panel (Row 2) where they belong."""
                     if not times:
                         return
                     times = sorted(times)
@@ -839,49 +876,23 @@ with tab_sim:
                         if e - s < DT * 2:  # skip tiny slivers, keep it clean
                             continue
                         fig.add_vrect(x0=s, x1=e + DT, fillcolor=color, opacity=0.10,
-                                     line_width=0, layer="below")
+                                     line_width=0, layer="below", row=2, col=1)
                         fig.add_annotation(x=(s + e + DT) / 2, y=label_y,
                                           text=f"<b>{label}</b>", showarrow=False,
                                           font=dict(size=10, color=color),
-                                          opacity=0.75, yref="y2 domain",
-                                          yanchor="top")
+                                          opacity=0.75, yanchor="top",
+                                          row=2, col=1)
 
-                _shade_regions(charge_hrs, "#2563EB", "CHARGING", 0.998)
-                _shade_regions(discharge_hrs, "#F97316", "DISCHARGING", 0.998)
+                _shade_regions(charge_hrs, "#2563EB", "CHARGING", 103)
+                _shade_regions(discharge_hrs, "#F97316", "DISCHARGING", 103)
 
-            # find and mark the single worst deviation block, with its real
-            # rupee penalty, so the chart states the story directly instead
-            # of leaving it to be inferred
-            worst_idx = max(range(len(chart_r.rows)),
-                           key=lambda i: abs(chart_r.rows[i].deviation_mwh))
-            worst_row = chart_r.rows[worst_idx]
-            if abs(worst_row.deviation_mwh) > 0.001:
-                fig.add_scatter(
-                    x=[hours[worst_idx]], y=[deliv_mw[worst_idx]],
-                    mode="markers", marker=dict(size=13, color="#DC2626",
-                    symbol="circle", line=dict(color="white", width=2)),
-                    name="Largest deviation", showlegend=False,
-                    hovertext=[f"Gap: {worst_row.deviation_mwh:+.2f} MWh this block "
-                              f"-> Rs {worst_row.dsm_penalty:,.0f} penalty"],
-                    hoverinfo="text")
-                fig.add_annotation(
-                    x=hours[worst_idx], y=deliv_mw[worst_idx],
-                    text=f"<b>Largest gap:</b> {worst_row.deviation_mwh:+.2f} MWh<br>"
-                         f"-> Rs {worst_row.dsm_penalty:,.0f} penalty",
-                    showarrow=True, arrowhead=2, arrowsize=0.8, arrowwidth=1.3,
-                    arrowcolor="#9CA3AF",
-                    ax=0, ay=-42, bgcolor="#F9FAFB", bordercolor="#E5E7EB",
-                    borderwidth=1, borderpad=6, font=dict(size=11, color="#374151"))
-            zero_deviation_today = abs(worst_row.deviation_mwh) <= 0.001
-
-            fig.update_layout(height=360, margin=dict(l=10, r=10, t=10, b=10),
-                              legend=dict(orientation="h", y=1.12),
-                              xaxis_title="Hour of day", yaxis_title="MW",
-                              xaxis=dict(range=[0, 24]),
-                              yaxis2=dict(title="Battery charge (%)", overlaying="y",
-                                        side="right", range=[0, 105],
-                                        showgrid=False),
-                              hovermode="x unified")
+            fig.update_layout(height=600, margin=dict(l=10, r=10, t=10, b=10),
+                              legend=dict(orientation="h", y=1.08),
+                              hovermode="x unified", template="plotly_white")
+            fig.update_xaxes(range=[0, 24], row=1, col=1)
+            fig.update_xaxes(range=[0, 24], row=2, col=1, title_text="Hour of day")
+            fig.update_yaxes(title_text="MW", row=1, col=1)
+            fig.update_yaxes(title_text="Battery charge (%)", range=[0, 110], row=2, col=1)
 
             if zero_deviation_today:
                 st.success(
