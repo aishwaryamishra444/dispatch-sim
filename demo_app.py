@@ -805,6 +805,18 @@ with tab_sim:
             fig.add_scatter(x=hours, y=deliv_mw, name="Delivered (MW)",
                             line=dict(color=BLUE, width=2.2), row=1, col=1)
 
+            # For S5 specifically: show the ORIGINAL, pre-optimization
+            # forecast as a muted phantom reference line. S5 rewrites its
+            # own schedule to match actual generation, so without this,
+            # the baseline promise a naive forecast would have made is
+            # invisible -- this makes the "how much did it correct for"
+            # story visible, not just a number to read separately.
+            if name == "S5 - Optimizer":
+                fig.add_scatter(x=hours, y=list(forecast),
+                               name="Original Forecast Schedule (MW)",
+                               line=dict(color="rgba(150,150,150,.65)",
+                                       dash="dot", width=1.5), row=1, col=1)
+
             # "Optimal vs Base" overlay -- superimpose S5's own optimal
             # schedule directly on top of this baseline's chart, so the
             # uplift is visible, not just a number to read separately.
@@ -905,7 +917,36 @@ with tab_sim:
             fig.update_yaxes(title_text="MW", row=1, col=1)
             fig.update_yaxes(title_text="Battery charge (%)", range=[0, 110], row=2, col=1)
 
-            if zero_deviation_today:
+            if zero_deviation_today and name == "S5 - Optimizer":
+                weather_noise_mwh = sum(abs(a - f) for a, f in zip(actual, forecast))
+                soc_now_pct = 100 * chart_r.rows[0].soc_mwh / cap if chart_r.rows[0].soc_mwh is not None else 0
+                penalty_saved = r1.total("dsm_penalty") - r.total("dsm_penalty")
+                wear_cost = r.total("degradation")
+                uplift_here = r.total("profit") - results[best].total("profit")
+
+                mcol1, mcol2, mcol3 = st.columns(3)
+                mcol1.metric("DSM Penalty Exposure", INR(r.total("dsm_penalty")),
+                            f"Saved {INR(penalty_saved)} vs S1" if penalty_saved > 0 else None)
+                mcol2.metric("Battery Wear Cost", INR(wear_cost),
+                            f"SoC held at {soc_now_pct:.0f}%")
+                mcol3.metric("Annualized Value vs Best Baseline",
+                            INR(uplift_here * 330) if uplift_here > 0 else INR(0))
+
+                st.info(
+                    f"**OPTIMIZER DISPATCH STRATEGY: PERFECT FORESIGHT ALIGNMENT**\n\n"
+                    f"**Status:** Optimal convergence achieved (0.00% deviation exposure)\n\n"
+                    f"**Dynamic schedule morphing:** the engine saw {weather_noise_mwh:.1f} "
+                    f"MWh of intraday weather noise between forecast and actual, and "
+                    f"re-declared the schedule to match physical generation exactly, "
+                    f"eliminating DSM exposure entirely.\n\n"
+                    f"**Asset protection:** because the PPA rate is flat (Rs {ppa:.2f}/kWh) "
+                    f"and deviation penalties are already eliminated by scheduling "
+                    f"accuracy alone, the battery is held at {soc_now_pct:.0f}% SoC -- "
+                    f"real wear cost incurred: {INR(wear_cost)}. This holds at any "
+                    f"Generation Deviation slider setting, since the optimizer always "
+                    f"sees the real outcome before scheduling."
+                )
+            elif zero_deviation_today:
                 st.success(
                     "**Zero deviation achieved.** Schedule exactly matches "
                     "generation: no DSM exposure, and no reason to use the "
