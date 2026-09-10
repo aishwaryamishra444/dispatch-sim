@@ -883,9 +883,14 @@ with tab_sim:
                     x=hours[len(hours)//2], y=max(actual_mw_list) * 0.5 if actual_mw_list else 1,
                     text="<b>Zero deviation achieved</b><br>Schedule exactly matches "
                          "generation -- no DSM exposure, no reason to use the battery "
-                         "under a flat PPA. This is the optimum, not an empty chart.",
+                         "under a flat PPA. This is the optimum, not an empty chart.<br>"
+                         "<i>True at any Generation Deviation slider setting -- the "
+                         "optimizer sees the real outcome before scheduling, so its "
+                         "own deviation is always zero by design. The slider still "
+                         "raises the BASELINE scenarios' exposure (and therefore the "
+                         "uplift number) -- just never this chart.</i>",
                     showarrow=False, bgcolor="#F0FDF4", bordercolor="#BBF7D0",
-                    borderwidth=1, borderpad=8, font=dict(size=11, color="#166534"))
+                    borderwidth=1, borderpad=8, font=dict(size=10.5, color="#166534"))
 
             fig.update_layout(height=360, margin=dict(l=10, r=10, t=10, b=10),
                               legend=dict(orientation="h", y=1.12),
