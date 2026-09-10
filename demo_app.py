@@ -754,6 +754,70 @@ with tab_sim:
             else:
                 scenario_card(name, r, compare_to=p1)
 
+            if name == "S5 - Optimizer":
+                with st.expander("View Optimization Engine Architecture & Formulation"):
+                    st.markdown(
+                        "This engine is a deterministic Linear Program (LP), solved "
+                        "with `PuLP`/`CBC` across all 96 fifteen-minute blocks jointly. "
+                        "Every value below is read live from this run's actual inputs, "
+                        "not a fixed example."
+                    )
+                    st.markdown("**Objective function** (matches `lp_dispatch.py` exactly):")
+                    st.latex(r"\text{Maximize} \sum_{t=1}^{96} \Big["
+                            r"\text{Revenue}_t + \text{Receivable}_t - \text{Payable}_t "
+                            r"- C_{\text{deg}} \cdot \text{Throughput}_t \Big]")
+                    st.caption(f"Live values this run: PPA tariff = Rs {ppa:.2f}/kWh, "
+                              f"degradation cost = Rs {deg:.2f}/kWh cycled.")
+
+                    st.markdown("**CERC DSM 2024 piecewise penalty** -- the real "
+                              "tiered structure from `dsm_bands.yaml`, not a "
+                              "zero-penalty dead-band (there is no free zone; "
+                              "Band 1 is charged at 100% of tariff):")
+                    edges = dsm_cfg.bands.edges_pct
+                    over_rates = dsm_cfg.bands.over_rates
+                    under_rates = dsm_cfg.bands.under_rates
+                    band_rows = []
+                    prev_edge = 0.0
+                    for i, edge in enumerate(edges):
+                        band_rows.append(f"{prev_edge:.0f}\\%\\text{{--}}{edge:.0f}\\%: "
+                                        f"{under_rates[i]:.2f}\\times\\lambda_{{PPA}} "
+                                        f"\\text{{ (under)}}, "
+                                        f"{over_rates[i]:.2f}\\times\\lambda_{{PPA}} "
+                                        f"\\text{{ (over)}}")
+                        prev_edge = edge
+                    band_rows.append(f">{edges[-1]:.0f}\\%: "
+                                    f"{under_rates[-1]:.2f}\\times\\lambda_{{PPA}} "
+                                    f"\\text{{ (under)}}, "
+                                    f"{over_rates[-1]:.2f}\\times\\lambda_{{PPA}} "
+                                    f"\\text{{ (over)}}")
+                    st.latex(r"\text{Penalty}(D_t) = \begin{cases}" +
+                            r" \\ ".join(band_rows) + r"\end{cases}")
+
+                    st.markdown("**Battery SoC transition** (matches "
+                              "`core/battery.py` exactly):")
+                    st.latex(r"SoC_t = SoC_{t-1} + \left(\eta \cdot P_{ch,t} - "
+                            r"\frac{P_{dis,t}}{\eta}\right) \cdot \Delta t "
+                            r"\quad,\quad \eta = \sqrt{RTE}")
+                    st.caption(f"Live values this run: RTE = 88% (fixed constant "
+                              f"used throughout the app, not a slider), "
+                              f"so eta (each leg) = {0.88**0.5:.3f}.")
+
+                    st.markdown("**Physical bounds:**")
+                    st.latex(r"SoC_{\min} \le SoC_t \le SoC_{\max} \quad,\quad "
+                            r"0 \le P_{ch,t}, P_{dis,t} \le P_{\text{c-rate}}")
+
+                    st.info(
+                        "**Why the lines converge under a flat PPA:** since "
+                        "$\\lambda_{PPA}$ doesn't vary by hour, there's no revenue "
+                        "gain from shifting energy in time -- only downside from "
+                        "$C_{deg}$. The mathematically optimal move is to set the "
+                        "schedule to match generation exactly, driving the penalty "
+                        "term to zero, and leave the battery idle since cycling it "
+                        "would only add cost with no offsetting gain. This is a "
+                        "genuine property of the optimal solution under these "
+                        "conditions, not a rule written into the code."
+                    )
+
             st.write("")
             # chart_r: S3's chart must always show its OWN battery physics --
             # even when held back and r==r1 for the adopted numbers, the
