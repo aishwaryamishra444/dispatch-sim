@@ -224,12 +224,26 @@ st.sidebar.title("Agentic Grid Simulator")
 st.sidebar.caption("Baseline Scenarios 1-3 - CERC DSM 2024")
 
 plant_capacity_mw = st.sidebar.number_input(
-    "Plant capacity (MW)", min_value=0.05, max_value=500.0, value=10.0, step=0.05,
-    help="Your plant's installed capacity. This is the denominator CERC uses "
-         "for deviation percentage (Regulation 6(2)). O&M cost below is scaled "
-         "proportionally from this too -- 0.3 MW (300 kW) and 1 MW both work "
-         "correctly, tested against the engine directly."
+    "Contracted / nameplate capacity (MW)", min_value=0.05, max_value=500.0,
+    value=10.0, step=0.05,
+    help="The capacity in your PPA paperwork. This is the denominator CERC "
+         "uses for deviation percentage (Regulation 6(2)) -- Available "
+         "Capacity = this x 0.25h per block. O&M below scales proportionally "
+         "from this too."
 )
+real_capacity_mw = st.sidebar.number_input(
+    "Real achievable capacity (MW)", min_value=0.05, max_value=500.0,
+    value=plant_capacity_mw, step=0.05,
+    help="What the plant can genuinely produce -- may be lower than the "
+         "contracted figure above (inverter clipping, site losses, panel "
+         "derating). This caps actual generation; the contracted figure "
+         "above still sets the DSM penalty denominator -- these are two "
+         "genuinely different numbers when they differ, per PPA regulation."
+)
+if real_capacity_mw > plant_capacity_mw:
+    st.sidebar.caption(":orange[Real capacity exceeds contracted capacity -- "
+                       "generation will be capped at the contracted figure, "
+                       "since you can't legally exceed what's contracted.]")
 
 st.sidebar.divider()
 st.sidebar.subheader("Data source")
@@ -393,7 +407,12 @@ if using_real:
     forecast, actual = real_forecast, real_actual
     hours = np.arange(BLOCKS) * DT
 else:
-    forecast, actual, hours = make_day(st.session_state.seed, err, plant["plant_mw"])
+    # Generation is capped at what the plant can genuinely produce, not the
+    # contracted figure -- AvC (plant["plant_mw"], used throughout the DSM
+    # settlement engine) stays at the CONTRACTED capacity regardless, since
+    # that's the PPA-paperwork figure CERC's regulation measures against.
+    effective_gen_cap_mw = min(real_capacity_mw, plant_capacity_mw)
+    forecast, actual, hours = make_day(st.session_state.seed, err, effective_gen_cap_mw)
 
 r1 = run_s1(forecast, actual, plant, dsm_cfg, s1_cfg)
 r2 = run_s2(forecast, actual, plant, dsm_cfg, s2_cfg,
@@ -661,6 +680,21 @@ with tab_sim:
             })
             st.dataframe(df.style.format({"Amount (Rs)": "{:,.0f}"}),
                         hide_index=True, use_container_width=True, height=175)
+
+            total_sched_mwh = sum(row.scheduled_mwh for row in b.rows)
+            with st.expander("How is PPA revenue calculated?"):
+                st.caption(
+                    f"**PPA Revenue = Total Scheduled Energy x 1,000 (MWh->kWh) x Tariff**\n\n"
+                    f"= {total_sched_mwh:.4f} MWh x 1,000 x Rs {ppa:.2f}/kWh\n\n"
+                    f"= **Rs {b.total('ppa_revenue'):,.2f}**\n\n"
+                    f"Not driven directly by plant capacity -- driven by *scheduled "
+                    f"energy*, which is the sum of 96 individual 15-minute schedules. "
+                    f"Plant capacity ({plant_capacity_mw:g} MW) shapes that total "
+                    f"indirectly: it caps how much any single block can schedule "
+                    f"(Available Capacity = capacity x 0.25h), and the day's overall "
+                    f"shape scales with it."
+                )
+
             delta = f"{INR(r.total('profit') - compare_to)} vs S1" if compare_to is not None else None
             dcolor = ("normal" if compare_to is None or r.total("profit") >= compare_to
                      else "inverse")
@@ -719,24 +753,100 @@ with tab_sim:
             actual_mw_list = [row.actual_gen_mwh * 4 for row in chart_r.rows]
 
             fig = go.Figure()
+
+            # Real tiered DSM tolerance corridor around the schedule line --
+            # using the actual CERC band edges from dsm_bands.yaml (5/10/20%
+            # of Available Capacity), not an invented "dead-band". Band 1
+            # (0-5%) is NOT zero-penalty -- it's charged at 100% of tariff,
+            # just the gentlest of the four tiers. Colors deepen with
+            # severity to show which tier a delivery falls into, visually.
+            avc_mw_equiv = plant_capacity_mw  # AvC(MWh)=cap*DT; in MW-equiv terms (x4) = cap
+            band_edges_mw = [0.05 * avc_mw_equiv, 0.10 * avc_mw_equiv, 0.20 * avc_mw_equiv]
+            band_colors = ["rgba(250,204,21,.16)", "rgba(249,115,22,.14)", "rgba(220,38,38,.12)"]
+            band_labels = ["Band 1 (0-5% AvC)", "Band 2 (5-10% AvC)", "Band 3 (10-20% AvC)"]
+            prev_upper = sched_mw
+            prev_lower = sched_mw
+            for edge, color, blabel in zip(band_edges_mw, band_colors, band_labels):
+                upper = [s + edge for s in sched_mw]
+                lower = [max(0, s - edge) for s in sched_mw]
+                fig.add_scatter(x=hours, y=upper, mode="lines", line=dict(width=0),
+                               showlegend=False, hoverinfo="skip")
+                fig.add_scatter(x=hours, y=prev_upper, mode="lines", line=dict(width=0),
+                               fill="tonexty", fillcolor=color, showlegend=False,
+                               hoverinfo="skip")
+                fig.add_scatter(x=hours, y=lower, mode="lines", line=dict(width=0),
+                               showlegend=False, hoverinfo="skip")
+                fig.add_scatter(x=hours, y=prev_lower, mode="lines", line=dict(width=0),
+                               fill="tonexty", fillcolor=color, showlegend=False,
+                               hoverinfo="skip", name=blabel)
+                prev_upper, prev_lower = upper, lower
+
             fig.add_scatter(x=hours, y=actual_mw_list,
-                            name="Actual gen (MW)", line=dict(color="#F59E0B", width=2),
-                            fill="tozeroy", fillcolor="rgba(245,158,11,.08)")
-            # shaded gap between schedule and delivered -- makes the
-            # "deviation = money" story visible as a colored region
-            # instead of something the eye has to estimate between lines
+                            name="Actual gen (MW)", line=dict(color="#F59E0B", width=2))
             fig.add_scatter(x=hours, y=sched_mw, name="Schedule (MW)",
                             line=dict(color=INK, width=1.8, dash="dash"))
             fig.add_scatter(x=hours, y=deliv_mw, name="Delivered (MW)",
-                            line=dict(color=BLUE, width=2.2),
-                            fill="tonexty", fillcolor="rgba(220,38,38,.14)")
+                            line=dict(color=BLUE, width=2.2))
+
+            # "Optimal vs Base" overlay -- superimpose S5's own optimal
+            # schedule directly on top of this baseline's chart, so the
+            # uplift is visible, not just a number to read separately.
+            if r5 is not None and name != "S5 - Optimizer":
+                r5_sched_mw = [row.scheduled_mwh * 4 for row in r5.rows]
+                fig.add_scatter(x=hours, y=r5_sched_mw, name="S5 Optimal Schedule",
+                               line=dict(color="#7C3AED", width=1.6, dash="dot"))
 
             soc = [row.soc_mwh for row in chart_r.rows]
-            if any(s is not None for s in soc):
-                fig.add_scatter(x=hours, y=[s / 4 if s else 0 for s in soc],
-                                name="SoC (MWh/4)",
-                                line=dict(color=GREEN, width=2),
-                                fill="tozeroy", fillcolor="rgba(63,174,73,.10)")
+            has_battery = any(s is not None for s in soc)
+            if has_battery:
+                soc_pct = [100 * s / cap if s is not None else None for s in soc]
+                fig.add_scatter(x=hours, y=soc_pct, name="Battery charge (%)",
+                                line=dict(color=GREEN, width=2.6),
+                                fill="tozeroy", fillcolor="rgba(63,174,73,.08)",
+                                yaxis="y2")
+
+                # Detect charging vs discharging from the SoC trajectory's
+                # DOMINANT trend, not raw per-block deltas -- deviation
+                # buffering causes small block-to-block noise even within a
+                # genuine charging period, which would otherwise flicker
+                # between "charging"/"discharging" labels. A 1-hour rolling
+                # average filters that noise while still catching real cycles.
+                soc_clean = [s if s is not None else soc[0] for s in soc]
+                raw_deltas = [0.0] + [soc_clean[i] - soc_clean[i-1] for i in range(1, len(soc_clean))]
+                W = 4  # 1 hour = 4 blocks of 15 min
+                smoothed = [sum(raw_deltas[max(0,i-W+1):i+1]) / min(i+1, W)
+                           for i in range(len(raw_deltas))]
+                THRESH = 0.02
+                charge_hrs = [hours[i] for i, d in enumerate(smoothed) if d > THRESH]
+                discharge_hrs = [hours[i] for i, d in enumerate(smoothed) if d < -THRESH]
+
+                def _shade_regions(times, color, label, label_y):
+                    """Group contiguous hours into shaded background bands
+                    with one clear text label per contiguous region."""
+                    if not times:
+                        return
+                    times = sorted(times)
+                    start = times[0]
+                    prev = times[0]
+                    regions = []
+                    for t in times[1:]:
+                        if t - prev > DT * 1.5:
+                            regions.append((start, prev))
+                            start = t
+                        prev = t
+                    regions.append((start, prev))
+                    for s, e in regions:
+                        if e - s < DT * 2:  # skip tiny slivers, keep it clean
+                            continue
+                        fig.add_vrect(x0=s, x1=e + DT, fillcolor=color, opacity=0.10,
+                                     line_width=0, layer="below")
+                        fig.add_annotation(x=(s + e + DT) / 2, y=label_y,
+                                          text=f"<b>{label}</b>", showarrow=False,
+                                          font=dict(size=11, color=color),
+                                          yref="y2")
+
+                _shade_regions(charge_hrs, "#2563EB", "CHARGING", 97)
+                _shade_regions(discharge_hrs, "#F97316", "DISCHARGING", 97)
 
             # find and mark the single worst deviation block, with its real
             # rupee penalty, so the chart states the story directly instead
@@ -764,18 +874,28 @@ with tab_sim:
             fig.update_layout(height=360, margin=dict(l=10, r=10, t=10, b=10),
                               legend=dict(orientation="h", y=1.12),
                               xaxis_title="Hour of day", yaxis_title="MW",
+                              yaxis2=dict(title="Battery charge (%)", overlaying="y",
+                                        side="right", range=[0, 105],
+                                        showgrid=False),
                               hovermode="x unified")
             st.plotly_chart(fig, use_container_width=True,
                            key=f"dayprofile_{name}")
             if name == "S3 - Time windows":
-                st.caption("Shaded red = the gap between promise and delivery. "
-                          "The green SoC line always shows this strategy's own "
-                          "charge/discharge physics, whether or not it's the one "
-                          "actually adopted today -- see the badge above for that.")
+                st.caption("Yellow/orange/red bands around Schedule = the real "
+                          "CERC tiers (5/10/20% of Available Capacity) -- Band 1 "
+                          "is charged at 100% of tariff, not zero-penalty. Purple "
+                          "dotted line = the optimizer's own schedule, for direct "
+                          "comparison. Blue/orange bands mark this strategy's real "
+                          "CHARGING/DISCHARGING physics, whether or not it's "
+                          "actually adopted today (see the badge above).")
             else:
-                st.caption("Shaded red = the gap between promise and delivery -- "
-                          "this is what CERC prices. The marked point is the "
-                          "single worst block of the day, with its real penalty.")
+                st.caption("Yellow/orange/red bands around Schedule = the real "
+                          "CERC tiers (5/10/20% of Available Capacity) -- Band 1 "
+                          "is charged at 100% of tariff, not zero-penalty. Purple "
+                          "dotted line = the optimizer's own schedule, for direct "
+                          "comparison. Blue/orange bands mark CHARGING and "
+                          "DISCHARGING. The marked point is the single worst "
+                          "block of the day, with its real penalty.")
 
     st.write("")
     if r5 is not None:
