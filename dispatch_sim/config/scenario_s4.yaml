@@ -1,0 +1,5 @@
+name: "S4 - Real-time Controller"
+battery:
+  enabled: true
+  mode: reactive                        # reacts block-by-block, no foresight
+degradation_inr_per_kwh: 2.5            # D3: per kWh throughput, x0.5. NEEDS-CONFIRMATION

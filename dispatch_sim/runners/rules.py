@@ -24,6 +24,56 @@ def run_s1(forecast, actual, plant, dsm_cfg: DsmConfig, scen: dict,
                         zeros, plant, dsm_cfg, 0.0, scen)
 
 
+def run_s4(forecast, actual, plant, dsm_cfg: DsmConfig, scen: dict,
+           battery: Battery) -> ScenarioResult:
+    """S4 - Real-time reactive controller. Unlike S5 (perfect foresight,
+    rewrites the whole day's schedule), S4 keeps the schedule fixed at the
+    day-ahead forecast and reacts block-by-block using ONLY that block's
+    actual-vs-schedule gap -- a genuinely deployable, non-clairvoyant
+    strategy. It intervenes only once a deviation would push past CERC's
+    gentlest band (Band 1, the first entry in dsm_cfg.bands.edges_pct) into
+    the steeper tiers -- there is NO zero-penalty dead-band in the real
+    regulation (Band 1 is charged at 100% of tariff), so the trigger and
+    target are both set at the real Band 1 edge, not an invented free zone.
+    Uses the real Battery class throughout, so its physics/efficiency are
+    identical to every other scenario -- a fair comparison, not a separate
+    approximation."""
+    sched = list(forecast)  # fixed at forecast -- no foresight, unlike S5
+    avc_mw = plant["plant_mw"]  # AvC(MWh) = plant_mw * DT; in MW terms this IS plant_mw
+    band1_edge_pct = dsm_cfg.bands.edges_pct[0] / 100.0  # real config value, e.g. 0.05
+    threshold_mw = avc_mw * band1_edge_pct
+
+    delivered, soc_series, thr = [], [], []
+    for t in range(BLOCKS):
+        thr0 = battery.throughput_mwh
+        gap_mw = sched[t] - actual[t]  # positive = shortfall, negative = excess
+
+        if abs(gap_mw) <= threshold_mw:
+            # Already inside Band 1 -- its cost is modest and doesn't
+            # justify spending battery wear to chase it to zero.
+            net_delivered = actual[t]
+        elif gap_mw > 0:
+            # Shortfall beyond Band 1 -- discharge just enough to pull the
+            # gap back down to the Band 1 edge, not all the way to zero.
+            need = gap_mw - threshold_mw
+            dis = battery.discharge(need)
+            net_delivered = actual[t] + dis
+        else:
+            # Excess beyond Band 1 -- charge just enough to pull the gap
+            # back down to the Band 1 edge.
+            need = (-gap_mw) - threshold_mw
+            accepted = battery.charge(need)
+            net_delivered = actual[t] - accepted
+
+        delivered.append(net_delivered)
+        soc_series.append(battery.soc_mwh)
+        thr.append(battery.throughput_mwh - thr0)
+
+    return build_ledger(scen["name"], sched, actual, delivered, soc_series,
+                        thr, plant, dsm_cfg,
+                        scen.get("degradation_inr_per_kwh", 2.5), scen)
+
+
 def run_s2(forecast, actual, plant, dsm_cfg: DsmConfig, scen: dict,
            battery: Battery) -> ScenarioResult:
     """S2 - Buffer: all generation passes through the BESS; discharge targets

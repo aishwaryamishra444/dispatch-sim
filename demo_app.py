@@ -20,7 +20,7 @@ import streamlit.components.v1 as components
 from dispatch_sim.core.battery import Battery
 from dispatch_sim.io.loaders import load_dsm_config, load_yaml, load_series_csv_buffer
 from dispatch_sim.io.iex_loader import IEXFormatError, parse_iex_file
-from dispatch_sim.runners.rules import run_s1, run_s2, run_s3
+from dispatch_sim.runners.rules import run_s1, run_s2, run_s3, run_s4
 from dispatch_sim.optimizer.lp_dispatch import OptimizerBatterySpec, solve_optimal_dispatch
 
 CFG = Path(__file__).parent / "dispatch_sim" / "config"
@@ -401,6 +401,7 @@ plant["ppa_rate_inr_per_kwh"] = ppa
 dsm_cfg = load_dsm_config(CFG / "dsm_bands.yaml")
 s2_cfg = load_yaml(CFG / "scenario_s2.yaml"); s2_cfg["degradation_inr_per_kwh"] = deg
 s3_cfg = load_yaml(CFG / "scenario_s3.yaml"); s3_cfg["degradation_inr_per_kwh"] = deg
+s4_cfg = load_yaml(CFG / "scenario_s4.yaml"); s4_cfg["degradation_inr_per_kwh"] = deg
 s1_cfg = load_yaml(CFG / "scenario_s1.yaml")
 
 using_real = real_forecast is not None and real_actual is not None
@@ -429,7 +430,16 @@ r3_raw = run_s3(forecast, actual, plant, dsm_cfg, s3_cfg,
                 fresh_battery({"batteryUsableCapacity": float(cap)}))
 battery_deployed = r3_raw.total("profit") > r1.total("profit")
 r3 = r3_raw if battery_deployed else r1
-results = {"S1 - PPA only": r1, "S2 - Battery buffer": r2, "S3 - Time windows": r3}
+
+# S4 - Real-time reactive controller: genuinely deployable (no perfect
+# foresight, unlike S5), reacting block-by-block to each block's own
+# actual-vs-schedule gap using the real CERC Band 1 edge as its trigger --
+# not an invented zero-penalty dead-band.
+r4 = run_s4(forecast, actual, plant, dsm_cfg, s4_cfg,
+           fresh_battery({"batteryUsableCapacity": float(cap)}))
+
+results = {"S1 - PPA only": r1, "S2 - Battery buffer": r2, "S3 - Time windows": r3,
+          "S4 - Real-time Controller": r4}
 
 optimizer_error = None
 try:
@@ -710,7 +720,8 @@ with tab_sim:
                                  "result, shown even while not adopted.")
 
     p1 = r1.total("profit")
-    baseline_keys = ["S1 - PPA only", "S2 - Battery buffer", "S3 - Time windows"]
+    baseline_keys = ["S1 - PPA only", "S2 - Battery buffer", "S3 - Time windows",
+                     "S4 - Real-time Controller"]
     best = max(baseline_keys, key=lambda k: results[k].total("profit"))
     worst_msg = (" -- the battery cannot pay for itself on DSM avoidance alone "
                  "under a flat PPA. That gap is the case for the Scenario 5 optimizer."
