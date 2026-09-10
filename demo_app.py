@@ -872,6 +872,20 @@ with tab_sim:
                     arrowcolor="#9CA3AF",
                     ax=0, ay=-42, bgcolor="#F9FAFB", bordercolor="#E5E7EB",
                     borderwidth=1, borderpad=6, font=dict(size=11, color="#374151"))
+            else:
+                # Zero deviation everywhere is a real, common result for the
+                # optimizer (perfect foresight -> schedule exactly matches
+                # generation -> zero DSM exposure, zero reason to touch the
+                # battery under a flat PPA). Without this note, an empty
+                # chart can look broken instead of looking like what it
+                # actually is: proof of compliance.
+                fig.add_annotation(
+                    x=hours[len(hours)//2], y=max(actual_mw_list) * 0.5 if actual_mw_list else 1,
+                    text="<b>Zero deviation achieved</b><br>Schedule exactly matches "
+                         "generation -- no DSM exposure, no reason to use the battery "
+                         "under a flat PPA. This is the optimum, not an empty chart.",
+                    showarrow=False, bgcolor="#F0FDF4", bordercolor="#BBF7D0",
+                    borderwidth=1, borderpad=8, font=dict(size=11, color="#166534"))
 
             fig.update_layout(height=360, margin=dict(l=10, r=10, t=10, b=10),
                               legend=dict(orientation="h", y=1.12),
