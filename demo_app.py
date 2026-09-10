@@ -307,12 +307,24 @@ with st.sidebar.expander("Real IEX price upload (for future P2P scenarios)"):
                         st.error(f"Still couldn't parse: {e2}")
 
 st.sidebar.divider()
-err = st.sidebar.slider("Generation Deviation: Actual vs Scheduled (%)", 3, 30, 12,
-                        help="How far actual generation lands from the day-ahead "
-                             "schedule. This single input is what drives every DSM "
-                             "penalty below -- it IS the 'Actual minus Scheduled' gap, "
-                             "expressed as a percentage. Watch S1/S2/S3 change as you "
-                             "move it.")
+if data_mode == "Synthetic (demo)":
+    err = st.sidebar.slider("Generation Deviation: Actual vs Scheduled (%)", 3, 30, 12,
+                            help="How far actual generation lands from the day-ahead "
+                                 "schedule. This single input is what drives every DSM "
+                                 "penalty below -- it IS the 'Actual minus Scheduled' gap, "
+                                 "expressed as a percentage. Watch S1/S2/S3 change as you "
+                                 "move it.")
+else:
+    # With real uploaded data, deviation is the literal gap between the two
+    # files, not a slider's doing -- showing an inactive slider here would
+    # mislead a reviewer into thinking it affects the displayed numbers.
+    # err stays defined (at the slider's own default) since the multi-day
+    # backtest and Grid Intelligence text both still use it independently
+    # of which data source is driving the main charts.
+    err = 12
+    st.sidebar.caption("Generation Deviation is hidden while using real "
+                      "uploaded data -- it's the literal gap between your "
+                      "two files, not a slider's doing.")
 ppa = st.sidebar.slider("PPA tariff (Rs/kWh)", 2.0, 4.5, 2.60, 0.05)
 
 with st.sidebar.expander("Battery degradation -- research & calculator"):
@@ -347,7 +359,7 @@ with st.sidebar.expander("Battery degradation -- research & calculator"):
                             value=669_800_000.0, step=1_000_000.0, format="%.0f",
                             help="Default reflects IRENA's 2024 $197/kWh for a "
                                  "40 MWh system at ~Rs 85/$.")
-    usable_kwh = st.number_input("Usable capacity (kWh)", min_value=1.0,
+    usable_kwh = st.number_input("Usable capacity (kWh)", min_value=0.0,
                                  value=float(st.session_state.get("cap_val", 40)) * 1000,
                                  step=1000.0, format="%.0f",
                                  help="Defaults to the BESS capacity slider below, in kWh.")
