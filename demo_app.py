@@ -861,13 +861,16 @@ with tab_sim:
                 prev_upper, prev_lower = upper, lower
 
             fig.add_scatter(x=hours, y=actual_mw_list,
-                            name="Actual gen (MW)", line=dict(color="#F59E0B", width=2),
+                            name="Actual gen (MW)",
+                            line=dict(color="rgba(245,158,11,.75)", width=4),
                             row=1, col=1)
             fig.add_scatter(x=hours, y=sched_mw, name="Schedule (MW)",
                             line=dict(color=INK, width=2.0, dash="dash"),
                             row=1, col=1)
             fig.add_scatter(x=hours, y=deliv_mw, name="Delivered (MW)",
-                            line=dict(color=BLUE, width=2.2), row=1, col=1)
+                            line=dict(color=BLUE, width=1.75),
+                            fill="tonexty", fillcolor="rgba(61,52,224,.08)",
+                            row=1, col=1)
 
             # For S5 specifically: show the ORIGINAL, pre-optimization
             # forecast as a muted phantom reference line. S5 rewrites its
