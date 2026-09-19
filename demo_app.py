@@ -329,33 +329,9 @@ ppa = st.sidebar.slider("PPA tariff (Rs/kWh)", 2.0, 4.5, 2.60, 0.05)
 
 with st.sidebar.expander("Battery degradation -- research & calculator"):
     st.caption(
-        "**Internationally sourced.** IRENA reports 2024 battery storage "
-        "installed cost at $197/kWh, down 93% from $2,634/kWh in 2010. "
-        "Real named manufacturers confirm the cycle-life range: SolaX "
-        "states LFP 'can easily handle over 6,000 cycles'; Energy-Storage."
-        "News reports the newest 2025/26 large-format LFP cells from CATL, "
-        "BYD, Eve Energy, Hithium, and CALB rated at 12,000+ cycles. A "
-        "2020 World Bank/ESMAP report on BESS warranties -- built with "
-        "direct input from Tesla and Fluence -- confirms cycle-based "
-        "throughput accounting (what this formula does) is the real "
-        "industry-standard warranty structure. Amortizing IRENA's cost "
-        "across this range gives:"
-    )
-    st.markdown(
-        "- **3,000 cycles** (conservative/academic baseline): ~Rs 5.58/kWh cycled\n"
-        "- **6,000 cycles** (SolaX-confirmed mid-tier): ~Rs 2.79/kWh cycled\n"
-        "- **12,000 cycles** (current top-tier, CATL/BYD/Eve/Hithium/CALB): ~Rs 1.40/kWh cycled"
-    )
-    st.caption(
-        "(Using an approximate Rs 85/$ rate -- re-verify against a live "
-        "rate for a final figure. Our Rs 2.50/kWh default sits inside this "
-        "sourced range, close to the 6,000-cycle mid-tier figure.)"
-    )
-    st.divider()
-    st.caption(
-        "**Or calculate from your own battery quote** -- same linear "
-        "amortization method used in the academic literature above "
-        "(cost per cycle / usable capacity)."
+        "**Or calculate from your own battery quote** -- linear "
+        "amortization (cost per cycle / usable capacity), the same "
+        "method used in peer-reviewed power systems literature."
     )
     calc_mode = st.radio("I know the warranty in:", ["Cycles", "Years"],
                         horizontal=True, key="deg_calc_mode")
@@ -379,18 +355,10 @@ with st.sidebar.expander("Battery degradation -- research & calculator"):
 
     cost_per_cycle = capex / warranted_cycles
     computed_deg = cost_per_cycle / usable_kwh
-    computed_deg_clamped = min(max(computed_deg, 0.5), 6.0)
+    deg = min(max(computed_deg, 0.5), 6.0)
 
     st.markdown(f"**-> Degradation cost: Rs {computed_deg:.2f}/kWh cycled**")
-    if st.button("Apply to slider below"):
-        st.session_state["deg_val"] = computed_deg_clamped
-        st.rerun()
 
-deg = st.sidebar.slider("Battery degradation (Rs/kWh cycled)", 0.5, 6.0,
-                        st.session_state.get("deg_val", 2.5), 0.1, key="deg_val",
-                        help="The single most sensitive input - flips S2/S3 economics. "
-                             "Sourced range: Rs 1.86-5.58/kWh per IRENA 2024 + peer-"
-                             "reviewed cycle-life literature (see expander above).")
 cap = st.sidebar.slider("BESS capacity (MWh)", 10, 80, 40, 5, key="cap_val")
 
 if "seed" not in st.session_state:
