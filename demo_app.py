@@ -718,18 +718,23 @@ with tab_sim:
                     f"shape scales with it."
                 )
 
-            delta = f"{INR(r.total('profit') - compare_to)} vs S1" if compare_to is not None else None
-            dcolor = ("normal" if compare_to is None or r.total("profit") >= compare_to
-                     else "inverse")
-            mcol1, mcol2 = st.columns(2) if live_attempt is not None else (st, None)
-            mcol1.metric("Net profit / day (adopted)" if live_attempt is not None
-                        else "Net profit / day",
-                        INR(r.total("profit")), delta, delta_color=dcolor)
             if live_attempt is not None:
-                mcol2.metric("If battery used (live)", INR(live_attempt),
-                            help="This number moves instantly with the degradation "
-                                 "and capacity sliders -- it's the fixed rule's raw "
-                                 "result, shown even while not adopted.")
+                # S3-specific: the ONLY big bold number shown is always S3's
+                # own genuine result (live_attempt). The real adopted outcome
+                # is still stated honestly in the badge text above (prose),
+                # just never repeated as a separate metric widget that could
+                # visually read as a copy of another scenario's own number.
+                st.metric("S3's own result (live)", INR(live_attempt),
+                         help="This is this strategy's own number, always -- "
+                              "moves instantly with any slider. Whether it's "
+                              "the one actually used today is stated in the "
+                              "badge above.")
+            else:
+                delta = f"{INR(r.total('profit') - compare_to)} vs S1" if compare_to is not None else None
+                dcolor = ("normal" if compare_to is None or r.total("profit") >= compare_to
+                         else "inverse")
+                st.metric("Net profit / day", INR(r.total("profit")), delta,
+                         delta_color=dcolor)
 
     p1 = r1.total("profit")
     baseline_keys = ["S1 - PPA only", "S2 - Battery buffer", "S3 - Time windows",
