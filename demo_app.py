@@ -336,9 +336,10 @@ with st.sidebar.expander("Battery degradation -- research & calculator"):
     calc_mode = st.radio("I know the warranty in:", ["Cycles", "Years"],
                         horizontal=True, key="deg_calc_mode")
     capex = st.number_input("Battery purchase price (Rs)", min_value=0.0,
-                            value=669_800_000.0, step=1_000_000.0, format="%.0f",
-                            help="Default reflects IRENA's 2024 $197/kWh for a "
-                                 "40 MWh system at ~Rs 85/$.")
+                            value=652_800_000.0, step=1_000_000.0, format="%.0f",
+                            help="Default reflects IRENA's 2024 $192/kWh for a "
+                                 "40 MWh system at ~Rs 85/$ -- re-verify against "
+                                 "a live rate for a final figure.")
     usable_kwh = st.number_input("Usable capacity (kWh)", min_value=0.0,
                                  value=float(st.session_state.get("cap_val", 40)) * 1000,
                                  step=1000.0, format="%.0f",
