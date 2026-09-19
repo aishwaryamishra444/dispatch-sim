@@ -329,23 +329,27 @@ ppa = st.sidebar.slider("PPA tariff (Rs/kWh)", 2.0, 4.5, 2.60, 0.05)
 
 with st.sidebar.expander("Battery degradation -- research & calculator"):
     st.caption(
-        "**Internationally sourced range.** IRENA (International Renewable "
-        "Energy Agency) reports 2024 battery storage installed cost at "
-        "$197/kWh, down 93% from $2,634/kWh in 2010. Peer-reviewed power "
-        "systems literature commonly assumes a 3,000-cycle life for "
-        "grid-scale lithium-ion; published LFP chemistry specs (the "
-        "dominant chemistry for stationary storage) range 2,500-9,000 "
-        "cycles. Amortizing IRENA's cost over that cycle range gives:"
+        "**Internationally sourced.** IRENA reports 2024 battery storage "
+        "installed cost at $197/kWh, down 93% from $2,634/kWh in 2010. "
+        "Real named manufacturers confirm the cycle-life range: SolaX "
+        "states LFP 'can easily handle over 6,000 cycles'; Energy-Storage."
+        "News reports the newest 2025/26 large-format LFP cells from CATL, "
+        "BYD, Eve Energy, Hithium, and CALB rated at 12,000+ cycles. A "
+        "2020 World Bank/ESMAP report on BESS warranties -- built with "
+        "direct input from Tesla and Fluence -- confirms cycle-based "
+        "throughput accounting (what this formula does) is the real "
+        "industry-standard warranty structure. Amortizing IRENA's cost "
+        "across this range gives:"
     )
     st.markdown(
-        "- **3,000 cycles:** ~Rs 5.58/kWh cycled\n"
-        "- **6,000 cycles:** ~Rs 2.79/kWh cycled\n"
-        "- **9,000 cycles:** ~Rs 1.86/kWh cycled"
+        "- **3,000 cycles** (conservative/academic baseline): ~Rs 5.58/kWh cycled\n"
+        "- **6,000 cycles** (SolaX-confirmed mid-tier): ~Rs 2.79/kWh cycled\n"
+        "- **12,000 cycles** (current top-tier, CATL/BYD/Eve/Hithium/CALB): ~Rs 1.40/kWh cycled"
     )
     st.caption(
         "(Using an approximate Rs 85/$ rate -- re-verify against a live "
         "rate for a final figure. Our Rs 2.50/kWh default sits inside this "
-        "sourced range, close to the 6,000-cycle midpoint.)"
+        "sourced range, close to the 6,000-cycle mid-tier figure.)"
     )
     st.divider()
     st.caption(
@@ -752,21 +756,7 @@ with tab_sim:
     scenario_tabs = st.tabs(list(results))
     for tab, (name, r) in zip(scenario_tabs, results.items()):
         with tab:
-            if name == "S3 - Time windows":
-                if battery_deployed:
-                    s3_badge = (f"Battery DEPLOYED: this strategy earns Rs "
-                              f"{r3_raw.total('profit'):,.0f}/day -- DSM savings cover "
-                              f"the wear cost.")
-                    s3_kind = "good"
-                else:
-                    s3_badge = (f"Battery HELD BACK: this strategy's own numbers earn "
-                              f"only Rs {r3_raw.total('profit'):,.0f}/day, not enough to "
-                              f"justify running the battery today, so it isn't used.")
-                    s3_kind = "warn"
-                scenario_card(name, r, compare_to=None, badge=s3_badge,
-                             badge_kind=s3_kind, live_attempt=r3_raw.total("profit"),
-                             breakdown_r=r3_raw)
-            elif name == "S1 - PPA only":
+            if name == "S1 - PPA only":
                 scenario_card(name, r)
             else:
                 scenario_card(name, r, compare_to=p1)
