@@ -225,16 +225,16 @@ st.sidebar.title("Agentic Grid Simulator")
 st.sidebar.caption("Baseline Scenarios 1-3 - CERC DSM 2024")
 
 plant_capacity_mw = st.sidebar.number_input(
-    "Contracted / nameplate capacity (MW)", min_value=0.05, max_value=500.0,
-    value=10.0, step=0.05,
+    "Contracted / nameplate capacity (MW)", min_value=0.001, max_value=500.0,
+    value=10.0, step=0.001, format="%.4f",
     help="The capacity in your PPA paperwork. This is the denominator CERC "
          "uses for deviation percentage (Regulation 6(2)) -- Available "
          "Capacity = this x 0.25h per block. O&M below scales proportionally "
          "from this too."
 )
 real_capacity_mw = st.sidebar.number_input(
-    "Real achievable capacity (MW)", min_value=0.05, max_value=500.0,
-    value=plant_capacity_mw, step=0.05,
+    "Real achievable capacity (MW)", min_value=0.001, max_value=500.0,
+    value=plant_capacity_mw, step=0.001, format="%.4f",
     help="What the plant can genuinely produce -- may be lower than the "
          "contracted figure above (inverter clipping, site losses, panel "
          "derating). This caps actual generation; the contracted figure "
