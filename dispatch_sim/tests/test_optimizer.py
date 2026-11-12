@@ -100,3 +100,19 @@ def test_optimizer_respects_battery_physics():
     floor, ceil = 40.0 * 0.10, 40.0 * 0.90
     for row in r5.rows:
         assert floor - 0.01 <= row.soc_mwh <= ceil + 0.01
+
+
+def test_optimizer_never_imports_and_never_over_schedules():
+    """The battery may only charge from the plant's own generation -- never
+    from the grid -- and the schedule may not exceed contracted capacity,
+    the same limits the rule-based scenarios live under. Checked on a day
+    and degradation cost where cycling is attractive."""
+    plant = load_yaml(CFG / "plant.yaml")
+    dsm = load_dsm_config(CFG / "dsm_bands.yaml")
+    for seed in (1, 4, 9):
+        fc, act = _make_day(seed, 25, plant["plant_mw"])
+        r5 = solve_optimal_dispatch(fc, act, plant, dsm,
+                                    OptimizerBatterySpec(40.0, 20.0, 0.88, 10, 90), 0.1)
+        for row in r5.rows:
+            assert row.delivered_mwh >= -1e-6, f"grid import at {row.time}"
+            assert row.scheduled_mwh <= plant["plant_mw"] * DT + 1e-6, row.time

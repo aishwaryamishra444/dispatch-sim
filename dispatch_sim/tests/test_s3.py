@@ -109,9 +109,11 @@ class TestS3WindowBoundaries:
         assert abs(rows_by_time["21:45"].soc_mwh - 4.0) < 1e-3
 
         # --- Degradation: total throughput x rate x 0.5 ---
-        # charge throughput = 20 blocks * 1.75 MW * DT = 8.75 MWh
-        # discharge throughput (drawn side) = 16 blocks * (1.771875/eta) * DT = 7.875 MWh
-        charge_thr = 20 * 1.75 * 0.25
+        # throughput is counted at the cells in both directions:
+        # charge (stored side) = 20 blocks * 1.75 MW * eta * DT = 7.875 MWh
+        # discharge (drawn side) = 16 blocks * (1.771875/eta) * DT = 7.875 MWh
+        charge_thr = 20 * 1.75 * eta * 0.25
+        assert abs(charge_thr - 7.875) < 1e-9
         discharge_thr = 16 * (1.771875 / eta) * 0.25
         total_thr_kwh = (charge_thr + discharge_thr) * 1000
         expected_degradation = total_thr_kwh * 2.5 * 0.5

@@ -20,7 +20,7 @@ import streamlit.components.v1 as components
 from dispatch_sim.core.battery import Battery
 from dispatch_sim.io.loaders import load_dsm_config, load_yaml, load_series_csv_buffer
 from dispatch_sim.io.iex_loader import IEXFormatError, parse_iex_file
-from dispatch_sim.runners.rules import run_s1, run_s2, run_s3, run_s4
+from dispatch_sim.runners.rules import run_s1, run_s2, run_s3, run_s4, discharge_trigger_mw
 from dispatch_sim.optimizer.lp_dispatch import OptimizerBatterySpec, solve_optimal_dispatch
 
 CFG = Path(__file__).parent / "dispatch_sim" / "config"
@@ -205,11 +205,19 @@ def make_day(seed: int, err_pct: float, plant_mw: float):
     return fc.tolist(), np.clip(act, 0, plant_mw).tolist(), h
 
 
+# Power rating scales with energy capacity: the 40 MWh / 20 MW reference
+# system is 0.5C. A fixed 20 MW would make a 10 MWh battery a physically
+# unrealistic 2C unit and an 80 MWh one an under-powered 0.25C unit.
+C_RATE_PER_MWH = 0.5
+
+
 def fresh_battery(spec_overrides=None):
-    spec = {"batteryUsableCapacity": 40.0, "cRateMW": 20.0,
+    spec = {"batteryUsableCapacity": 40.0, "cRateMW": None,
             "roundTripEfficiency": 0.88, "socMinPct": 10, "socMaxPct": 90}
     if spec_overrides:
         spec.update(spec_overrides)
+    if spec["cRateMW"] is None:
+        spec["cRateMW"] = C_RATE_PER_MWH * float(spec["batteryUsableCapacity"])
     return Battery(usable_capacity_mwh=spec["batteryUsableCapacity"],
                    c_rate_mw=spec["cRateMW"], rte=spec["roundTripEfficiency"],
                    soc_min_pct=spec["socMinPct"], soc_max_pct=spec["socMaxPct"])
@@ -430,10 +438,20 @@ r3 = r3_raw if battery_deployed else r1
 
 # S4 - Real-time reactive controller: genuinely deployable (no perfect
 # foresight, unlike S5), reacting block-by-block to each block's own
-# actual-vs-schedule gap using the real CERC Band 1 edge as its trigger --
-# not an invented zero-penalty dead-band.
+# actual-vs-schedule gap. Its discharge trigger is a real CERC band edge --
+# by default the first band whose penalty exceeds the cost of stored energy
+# (see run_s4 / scenario_s4.yaml).
 r4 = run_s4(forecast, actual, plant, dsm_cfg, s4_cfg,
            fresh_battery({"batteryUsableCapacity": float(cap)}))
+s4_trigger_mw = discharge_trigger_mw(plant, dsm_cfg, s4_cfg,
+                                     fresh_battery({"batteryUsableCapacity": float(cap)}))
+s4_trigger_pct = (100 * s4_trigger_mw / plant["plant_mw"]
+                  if s4_trigger_mw != float("inf") else None)
+s4_trigger_text = ("never discharges at these costs -- no CERC band's penalty "
+                   "exceeds the cost of stored energy"
+                   if s4_trigger_pct is None else
+                   f"discharges only for shortfalls beyond {s4_trigger_pct:.0f}% of "
+                   f"Available Capacity ({s4_trigger_mw:.2f} MW)")
 
 results = {"S1 - PPA only": r1, "S2 - Battery buffer": r2, "S3 - Time windows": r3,
           "S4 - Real-time Controller": r4}
@@ -442,7 +460,7 @@ optimizer_error = None
 try:
     r5 = solve_optimal_dispatch(
         forecast, actual, plant, dsm_cfg,
-        OptimizerBatterySpec(float(cap), 20.0, 0.88, 10, 90), deg)
+        OptimizerBatterySpec(float(cap), C_RATE_PER_MWH * float(cap), 0.88, 10, 90), deg)
     results["S5 - Optimizer"] = r5
 except Exception as e:  # noqa: BLE001 -- never let a solver hiccup crash the demo
     optimizer_error = str(e)
@@ -758,6 +776,10 @@ with tab_sim:
         with tab:
             if name == "S1 - PPA only":
                 scenario_card(name, r)
+            elif name == "S4 - Real-time Controller":
+                scenario_card(name, r, compare_to=p1,
+                              badge=f"Reactive, no foresight: S4 {s4_trigger_text}, "
+                                    f"and absorbs excess beyond the Band 1 edge.")
             elif name == "S3 - Time windows":
                 # Show S3's OWN line items and result, with a badge saying
                 # whether it actually ran today -- otherwise a held-back S3
@@ -949,56 +971,72 @@ with tab_sim:
             soc = [row.soc_mwh for row in chart_r.rows]
             has_battery = any(s is not None for s in soc)
             if has_battery:
-                soc_pct = [100 * s / cap if s is not None else None for s in soc]
-                fig.add_scatter(x=hours, y=soc_pct, name="Battery charge (%)",
+                # Each stored SoC is the END of its 15-min block, so plot it at
+                # block end and prepend the opening level at 00:00 (S4 opens
+                # at 50%, the others at the 10% floor). Plotting it at block
+                # start drew every change 15 minutes early.
+                opening_pct = 50.0 if name.startswith("S4") else 10.0
+                soc_x = [0.0] + [h + DT for h in hours]
+                soc_pct = [opening_pct] + [100 * s / cap if s is not None else None
+                                           for s in soc]
+                fig.add_scatter(x=soc_x, y=soc_pct, name="Battery charge (%)",
                                 line=dict(color=GREEN, width=2.6),
                                 fill="tozeroy", fillcolor="rgba(63,174,73,.08)",
                                 row=2, col=1)
 
-                # Detect charging vs discharging from the SoC trajectory's
-                # DOMINANT trend, not raw per-block deltas -- deviation
-                # buffering causes small block-to-block noise even within a
-                # genuine charging period, which would otherwise flicker
-                # between "charging"/"discharging" labels. A 1-hour rolling
-                # average filters that noise while still catching real cycles.
-                soc_clean = [s if s is not None else soc[0] for s in soc]
-                raw_deltas = [0.0] + [soc_clean[i] - soc_clean[i-1] for i in range(1, len(soc_clean))]
-                W = 4  # 1 hour = 4 blocks of 15 min
-                smoothed = [sum(raw_deltas[max(0,i-W+1):i+1]) / min(i+1, W)
-                           for i in range(len(raw_deltas))]
-                THRESH = 0.02
-                charge_hrs = [hours[i] for i, d in enumerate(smoothed) if d > THRESH]
-                discharge_hrs = [hours[i] for i, d in enumerate(smoothed) if d < -THRESH]
+                # Shade what the battery is actually doing in each block, from
+                # that block's own change in stored energy (start -> end):
+                # rising = charging, falling = discharging. (The old version
+                # shaded a trailing 1-hour average, which lagged reality by up
+                # to 45 minutes -- e.g. "DISCHARGING" shown after the battery
+                # was already empty. Grid-side flow isn't used because
+                # round-trip losses make it negative even when the stored
+                # level is flat, as in S2's pass-through.)
+                MIN_STEP_MWH = 0.005  # ignore numerically-zero changes
+                opening_mwh = cap * opening_pct / 100
+                soc_mwh = [opening_mwh] + [x if x is not None else opening_mwh for x in soc]
+                state = []
+                for i in range(len(soc)):
+                    step = soc_mwh[i + 1] - soc_mwh[i]
+                    state.append(-1 if step > MIN_STEP_MWH else
+                                 1 if step < -MIN_STEP_MWH else 0)
 
-                def _shade_regions(times, color, label, label_y):
-                    """Group contiguous hours into shaded background bands
-                    with one clear text label per contiguous region, on the
-                    battery panel (Row 2) where they belong."""
-                    if not times:
-                        return
-                    times = sorted(times)
-                    start = times[0]
-                    prev = times[0]
-                    regions = []
-                    for t in times[1:]:
-                        if t - prev > DT * 1.5:
-                            regions.append((start, prev))
-                            start = t
-                        prev = t
-                    regions.append((start, prev))
-                    for s, e in regions:
-                        if e - s < DT * 2:  # skip tiny slivers, keep it clean
-                            continue
-                        fig.add_vrect(x0=s, x1=e + DT, fillcolor=color, opacity=0.10,
+                def _regions(kind):
+                    """Contiguous runs of `kind`, bridging gaps of <= 2 idle
+                    blocks so one buffering episode reads as one band."""
+                    out, start, last = [], None, None
+                    for i, st_ in enumerate(state):
+                        if st_ == kind:
+                            if start is None:
+                                start = i
+                            elif i - last > 3 or any(state[last + 1:i]):
+                                # too long a gap, or the battery did the
+                                # opposite in between -- start a new band
+                                out.append((start, last)); start = i
+                            last = i
+                    if start is not None:
+                        out.append((start, last))
+                    return out
+
+                LABEL_MIN_H = 2.0  # label only bands >= 2 h wide (~75 px) -> no overlaps
+                for kind, color, label in [(-1, "#2563EB", "CHARGING"),
+                                           (1, "#F97316", "DISCHARGING")]:
+                    for a_, b_ in _regions(kind):
+                        x0, x1 = hours[a_], hours[b_] + DT
+                        fig.add_vrect(x0=x0, x1=x1, fillcolor=color, opacity=0.12,
                                      line_width=0, layer="below", row=2, col=1)
-                        fig.add_annotation(x=(s + e + DT) / 2, y=label_y,
-                                          text=f"<b>{label}</b>", showarrow=False,
-                                          font=dict(size=10, color=color),
-                                          opacity=0.75, yanchor="top",
-                                          row=2, col=1)
-
-                _shade_regions(charge_hrs, "#2563EB", "CHARGING", 103)
-                _shade_regions(discharge_hrs, "#F97316", "DISCHARGING", 103)
+                        if x1 - x0 >= LABEL_MIN_H:
+                            fig.add_annotation(x=(x0 + x1) / 2, y=103,
+                                              text=f"<b>{label}</b>", showarrow=False,
+                                              font=dict(size=10, color=color),
+                                              opacity=0.8, yanchor="top",
+                                              row=2, col=1)
+                    # legend key, so narrow unlabeled bands are still readable
+                    if any(sv == kind for sv in state):
+                        fig.add_scatter(x=[None], y=[None], mode="markers",
+                                        marker=dict(symbol="square", size=11,
+                                                    color=color, opacity=0.35),
+                                        name=label.capitalize(), row=2, col=1)
 
             fig.update_layout(height=600, margin=dict(l=10, r=10, t=10, b=10),
                               legend=dict(orientation="h", y=1.08),
@@ -1051,25 +1089,24 @@ with tab_sim:
 
             st.plotly_chart(fig, use_container_width=True,
                            key=f"dayprofile_{name}")
-            if name == "S3 - Time windows":
-                st.caption("Yellow, orange, and red bands around Schedule show "
-                          "the real CERC tiers (5%, 10%, and 20% of Available "
-                          "Capacity). Band 1 is charged at 100% of tariff, not "
-                          "zero-penalty. The purple dotted line is the "
-                          "optimizer's own schedule, shown for direct "
-                          "comparison. Blue and orange bands mark this "
-                          "strategy's real charging and discharging physics, "
-                          "whether or not it's actually adopted today (see "
-                          "the badge above).")
-            else:
-                st.caption("Yellow, orange, and red bands around Schedule show "
-                          "the real CERC tiers (5%, 10%, and 20% of Available "
-                          "Capacity). Band 1 is charged at 100% of tariff, not "
-                          "zero-penalty. The purple dotted line is the "
-                          "optimizer's own schedule, shown for direct "
-                          "comparison. Blue and orange bands mark charging "
-                          "and discharging. The marked point is the single "
-                          "worst block of the day, with its real penalty.")
+            # caption built from what this chart actually contains
+            cap_parts = ["Yellow, orange, and red bands around Schedule show the "
+                         "real CERC tiers (5%, 10%, and 20% of Available Capacity). "
+                         "Band 1 is charged at 100% of tariff, not zero-penalty."]
+            if r5 is not None and name != "S5 - Optimizer":
+                cap_parts.append("The purple dotted line is the optimizer's own "
+                                 "schedule, shown for direct comparison.")
+            if has_battery:
+                cap_parts.append(
+                    "Blue and orange bands in the lower panel mark the blocks where "
+                    "the battery is actually charging or discharging"
+                    + (" -- this strategy's own physics, whether or not it's "
+                       "adopted today (see the badge above)." if name == "S3 - Time windows"
+                       else "."))
+            if not zero_deviation_today:
+                cap_parts.append("The marked point is the single worst block of the "
+                                 "day, with its real penalty.")
+            st.caption(" ".join(cap_parts))
 
     st.write("")
     if r5 is not None:
@@ -1204,7 +1241,7 @@ with tab_sim:
                 try:
                     bt_r5 = solve_optimal_dispatch(
                         bt_fc, bt_act, plant, dsm_cfg,
-                        OptimizerBatterySpec(float(cap), 20.0, 0.88, 10, 90), deg)
+                        OptimizerBatterySpec(float(cap), C_RATE_PER_MWH * float(cap), 0.88, 10, 90), deg)
                     row["S5"] = bt_r5.total("profit")
                 except Exception as e:  # noqa: BLE001
                     row["S5"] = float("nan")
@@ -1333,10 +1370,9 @@ with tab_sim:
         if p4 > p1:
             lines.append(
                 f"S4's real-time controller earns Rs {p4:,.0f}/day -- Rs {p4 - p1:,.0f} "
-                f"more than S1. It only touches the battery when a block's gap would "
-                f"cross CERC's first band, so it avoids most of the penalty for a "
-                f"fraction of S2's wear: targeted, reactive use of the battery pays "
-                f"where blanket cycling does not."
+                f"more than S1. It {s4_trigger_text}, where CERC's penalty costs more "
+                f"than the stored energy and wear it spends -- targeted, reactive use "
+                f"of the battery pays where blanket cycling does not."
             )
         else:
             lines.append(
