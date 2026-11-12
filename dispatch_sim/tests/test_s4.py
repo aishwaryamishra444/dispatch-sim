@@ -219,3 +219,33 @@ class TestS4EconomicTrigger:
         r4 = run_s4(forecast, actual, plant, dsm, self._scen(2.5), make_battery())
         assert abs(r4.rows[10].delivered_mwh - 3.5 * 0.25) < 1e-6
         assert abs(r4.rows[20].delivered_mwh - (2.5 + 0.5) * 0.25) < 1e-6
+
+
+class TestS4EconomicCharging:
+    """In "economic" mode S4 also only stores excess the grid would pay less
+    for than storing keeps. Hand-derived (RTE 0.81, eta 0.9, tariff 2.60):
+      keep_x = 0.81 - deg*0.5*0.9/2.60
+      deg=2.5 -> 0.81 - 0.4327 = 0.377x -> first over-injection rate below it
+                 is Band 4 (0.00x), lower edge 20% of AvC = 2.0 MW.
+      deg=0.1 -> 0.81 - 0.0173 = 0.793x -> Band 3 (0.50x), edge 10% = 1.0 MW."""
+
+    def _scen(self, deg):
+        return {"name": "S4", "degradation_inr_per_kwh": deg,
+                "discharge_trigger": "economic"}
+
+    def test_charge_trigger_tracks_the_band_rates(self):
+        from dispatch_sim.runners.rules import charge_trigger_mw
+        plant, dsm = make_plant(), make_dsm()
+        assert charge_trigger_mw(plant, dsm, self._scen(2.5), make_battery()) == 2.0
+        assert charge_trigger_mw(plant, dsm, self._scen(0.1), make_battery()) == 1.0
+        assert charge_trigger_mw(plant, dsm, {"name": "S4"}, make_battery()) == 0.5
+
+    def test_only_cheap_excess_is_stored(self):
+        plant, dsm = make_plant(), make_dsm()
+        forecast = [5.0] * BLOCKS
+        actual = [5.0] * BLOCKS
+        actual[10] = 6.5   # 1.5 MW over: Bands 2-3 still pay 0.9x/0.5x -> export it
+        actual[20] = 7.5   # 2.5 MW over: 0.5 MW is in Band 4 (paid 0x) -> store that
+        r4 = run_s4(forecast, actual, plant, dsm, self._scen(2.5), make_battery())
+        assert abs(r4.rows[10].delivered_mwh - 6.5 * 0.25) < 1e-6
+        assert abs(r4.rows[20].delivered_mwh - 7.0 * 0.25) < 1e-6

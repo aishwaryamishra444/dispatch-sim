@@ -19,8 +19,9 @@ import streamlit.components.v1 as components
 
 from dispatch_sim.core.battery import Battery
 from dispatch_sim.io.loaders import load_dsm_config, load_yaml, load_series_csv_buffer
+from dispatch_sim.io.engine_file import detect_columns, detect_unit, parse_engine_file, read_table
 from dispatch_sim.io.iex_loader import IEXFormatError, parse_iex_file
-from dispatch_sim.runners.rules import run_s1, run_s2, run_s3, run_s4, discharge_trigger_mw
+from dispatch_sim.runners.rules import run_s1, run_s2, run_s3, run_s4, discharge_trigger_mw, charge_trigger_mw
 from dispatch_sim.optimizer.lp_dispatch import OptimizerBatterySpec, solve_optimal_dispatch
 
 CFG = Path(__file__).parent / "dispatch_sim" / "config"
@@ -257,15 +258,112 @@ if real_capacity_mw > plant_capacity_mw:
 st.sidebar.divider()
 st.sidebar.subheader("Data source")
 data_mode = st.sidebar.radio(
-    "Generation data", ["Synthetic (demo)", "Upload real day"],
+    "Generation data",
+    ["Synthetic (demo)", "Forecast-engine file (multi-day)", "Upload real day"],
     label_visibility="collapsed",
     help="Real data replaces the synthetic weather day used for the demo - "
-         "the settlement math is unchanged either way.")
+         "the settlement math is unchanged either way. 'Forecast-engine file' "
+         "takes the forecasting team's export as-is (many days, kW or MW, UTC "
+         "or IST); 'Upload real day' takes one day as two time,mw files.")
+
+
+@st.cache_data(show_spinner=False)
+def _parse_engine_cached(raw: bytes, unit: str, naive_tz: str):
+    return parse_engine_file(raw, unit=unit, naive_timestamps=naive_tz)
+
+
+def _nice_ceiling(x: float) -> float:
+    """Round up to a tidy plant size: 4.2 kW -> 5 kW, 7.97 MW -> 8 MW."""
+    if x <= 0:
+        return 1.0
+    step = 10 ** np.floor(np.log10(x))
+    return float(np.ceil(x / step - 1e-9) * step)
+
 
 real_forecast, real_actual = None, None
-if data_mode == "Upload real day":
-    st.sidebar.caption("CSV format: columns `time,mw` - 96 rows (15-min blocks). "
-                       "Same format the CLI (`--forecast`/`--actual`) expects.")
+engine_days_mw = None        # {day: (forecast_mw, actual_mw)} at simulator scale
+real_source_note = ""
+if data_mode == "Forecast-engine file (multi-day)":
+    st.sidebar.caption("One CSV with a timestamp column plus actual and forecast "
+                       "generation columns, 15-min resolution, any number of days "
+                       "-- e.g. `date, power_generation_actual_kw, "
+                       "forecast_generation_kw`.")
+    eng_file = st.sidebar.file_uploader("Forecast-engine export (CSV)", type=["csv"],
+                                        key="engine_upload")
+    if eng_file is not None:
+        raw = eng_file.getvalue()
+        try:
+            head = read_table(raw)
+            t_c, a_c, f_c = detect_columns(head.columns)
+            guess = detect_unit(a_c or "", f_c or "") if a_c and f_c else None
+            unit = st.sidebar.radio("Values are in", ["kW", "MW"], horizontal=True,
+                                    index=0 if guess != "MW" else 1, key="engine_unit",
+                                    help="Read from the column names when they say "
+                                         "(e.g. '_kw'); check it if they don't.")
+            has_offset = (t_c is not None and head[t_c].astype(str)
+                          .str.contains(r"(?:[+-]\d{2}:?\d{2}|Z)$", regex=True).all())
+            naive_tz = "UTC"
+            if has_offset:
+                st.sidebar.caption("Timestamps carry a UTC offset -- converted to "
+                                   "India time (IST) automatically.")
+            else:
+                naive_tz = st.sidebar.radio("Timestamps are in", ["UTC", "IST"],
+                                            horizontal=True, key="engine_tz")
+            eng = _parse_engine_cached(raw, unit, naive_tz)
+            src_peak_mw = eng.peak_mw
+            msg = f"{len(eng.days)} complete days loaded"
+            if eng.skipped:
+                msg += f"; {len(eng.skipped)} incomplete days skipped"
+            st.sidebar.success(msg + ".")
+            if eng.skipped or eng.filled_blocks:
+                with st.sidebar.expander("Data gaps"):
+                    if eng.filled_blocks:
+                        st.caption(f"{sum(eng.filled_blocks.values())} isolated missing "
+                                   f"readings on {len(eng.filled_blocks)} days were "
+                                   f"filled by interpolating their neighbours.")
+                    for d, why in eng.skipped.items():
+                        st.caption(f"{d}: skipped -- {why}")
+
+            src_cap_mw = st.sidebar.number_input(
+                f"This plant's capacity ({unit})", min_value=0.001,
+                value=_nice_ceiling(src_peak_mw * (1000 if unit == 'kW' else 1)),
+                step=0.5 if unit == "kW" else 0.1, format="%.3f", key="engine_src_cap",
+                help=f"The file's peak is {src_peak_mw * (1000 if unit == 'kW' else 1):.3f} "
+                     f"{unit}; the default rounds that up. Use the real nameplate "
+                     f"if you know it -- it decides how the profile is scaled.")
+            src_cap_mw = src_cap_mw / (1000 if unit == "kW" else 1)
+            scale_mode = st.sidebar.radio(
+                "Run it as", [f"Scaled to the {plant_capacity_mw:g} MW contracted plant",
+                              "Its own size (sets contracted capacity to match)"],
+                key="engine_scale",
+                help="Scaling keeps the real shape and forecast error but expresses "
+                     "it on the contracted plant above, so battery sizes and rupee "
+                     "figures stay comparable with the demo.")
+            if scale_mode.startswith("Scaled"):
+                k_scale = plant_capacity_mw / src_cap_mw
+            else:
+                k_scale = 1.0
+                plant_capacity_mw = src_cap_mw
+                real_capacity_mw = src_cap_mw
+            engine_days_mw = {d: ([x * k_scale for x in fc], [x * k_scale for x in ac])
+                              for d, (fc, ac) in eng.days.items()}
+            day_list = list(engine_days_mw)
+            pick_day = st.sidebar.selectbox("Day", day_list, key="engine_day",
+                                            help="IST calendar days with all 96 blocks.")
+            real_forecast, real_actual = engine_days_mw[pick_day]
+            real_source_note = (f"forecast-engine data, {pick_day} (IST)"
+                                + (f", scaled from {src_cap_mw * 1000:g} kW"
+                                   if k_scale != 1.0 and src_cap_mw < 1 else
+                                   f", scaled from {src_cap_mw:g} MW" if k_scale != 1.0 else ""))
+        except Exception as e:  # noqa: BLE001 -- show the reason, keep the demo up
+            st.sidebar.error(f"Couldn't read that file: {e}")
+    else:
+        st.sidebar.caption("Showing the synthetic day below until a file is uploaded.")
+
+elif data_mode == "Upload real day":
+    st.sidebar.caption("CSV format: columns `time,mw` - 96 rows (15-min blocks), "
+                       "values in MW, times in IST. Same format the CLI "
+                       "(`--forecast`/`--actual`) expects.")
     fc_file = st.sidebar.file_uploader("Forecast CSV (day-ahead schedule basis)",
                                        type=["csv"], key="fc_upload")
     act_file = st.sidebar.file_uploader("Actual generation CSV (telemetry)",
@@ -285,6 +383,25 @@ if data_mode == "Upload real day":
     if fc_file is None or act_file is None:
         st.sidebar.caption("Upload both files to switch off synthetic data - "
                            "showing the synthetic day below until then.")
+    elif real_forecast is not None and real_actual is not None:
+        real_source_note = f"uploaded day ({fc_file.name} / {act_file.name})"
+
+# Unit / capacity sanity check for any real data: catches a kW file read as
+# MW, or a profile from a different-sized plant, before it silently produces
+# meaningless settlement numbers.
+if real_forecast is not None and real_actual is not None:
+    up_peak = max(max(real_forecast), max(real_actual))
+    if up_peak > plant_capacity_mw * 1.02:
+        st.sidebar.warning(
+            f"This day peaks at {up_peak:.3f} MW -- above the {plant_capacity_mw:g} MW "
+            f"contracted capacity. Check the unit (kW vs MW) or raise the capacity "
+            f"above; deviation percentages will be wrong otherwise.")
+    elif up_peak < plant_capacity_mw * 0.10 and up_peak > 0:
+        st.sidebar.warning(
+            f"This day peaks at only {up_peak:.4f} MW -- under 10% of the "
+            f"{plant_capacity_mw:g} MW contracted capacity. If the values are kW or "
+            f"come from a smaller plant, use the 'Forecast-engine file' option to "
+            f"set the unit and scale, or lower the capacity above.")
 
 with st.sidebar.expander("Real IEX price upload (for future P2P scenarios)"):
     st.caption("Baseline Scenarios S1-S4 are PPA-only per the team plan and do "
@@ -323,16 +440,14 @@ if data_mode == "Synthetic (demo)":
                                  "expressed as a percentage. Watch S1-S4 change as you "
                                  "move it.")
 else:
-    # With real uploaded data, deviation is the literal gap between the two
-    # files, not a slider's doing -- showing an inactive slider here would
-    # mislead a reviewer into thinking it affects the displayed numbers.
-    # err stays defined (at the slider's own default) since the multi-day
-    # backtest and Grid Intelligence text both still use it independently
-    # of which data source is driving the main charts.
+    # With real data, deviation is the literal gap between forecast and
+    # actual, not a slider's doing -- so the slider is hidden. err keeps its
+    # default only for the synthetic backtest fallback (single uploaded
+    # day); Grid Intelligence reports the real gap instead.
     err = 12
     st.sidebar.caption("Generation Deviation is hidden while using real "
-                      "uploaded data -- it's the literal gap between your "
-                      "two files, not a slider's doing.")
+                      "data -- it's the literal gap between forecast and "
+                      "actual, not a slider's doing.")
 ppa = st.sidebar.slider("PPA tariff (Rs/kWh)", 2.0, 4.5, 2.60, 0.05)
 
 with st.sidebar.expander("Battery degradation -- research & calculator"):
@@ -352,7 +467,8 @@ with st.sidebar.expander("Battery degradation -- research & calculator"):
         value=16_320.0, step=500.0, format="%.0f",
         help="Default reflects IRENA's 2024 $192/kWh at ~Rs 85/$ -- "
              "re-verify against a live quote for a final figure.")
-    usable_kwh = float(st.session_state.get("cap_val", 40)) * 1000
+    usable_kwh = (float(st.session_state.get("bess_hours", 4.0))
+                  * plant_capacity_mw * 1000)
     capex = price_per_kwh * usable_kwh
     st.caption(f"Usable capacity follows the BESS slider: {usable_kwh:,.0f} kWh "
                f"-> total price Rs {capex / 1e7:,.2f} crore.")
@@ -380,7 +496,17 @@ with st.sidebar.expander("Battery degradation -- research & calculator"):
                    f"simulator limits this to Rs {DEG_MIN:.2f}-{DEG_MAX:.2f} "
                    f"and is using Rs {deg:.2f}.]")
 
-cap = st.sidebar.slider("BESS capacity (MWh)", 10, 80, 40, 5, key="cap_val")
+# Battery size is set in hours of the contracted capacity, so it stays
+# sensible for any plant: 4 h on the 10 MW default is the familiar 40 MWh,
+# and a 5 kW rooftop gets 20 kWh instead of an impossible 10 MWh minimum.
+bess_hours = st.sidebar.slider("BESS size (hours of plant capacity)", 0.5, 8.0, 4.0, 0.5,
+                               key="bess_hours",
+                               help="Usable energy = hours x contracted capacity. "
+                                    "Power is 0.5C (half the energy per hour).")
+cap = bess_hours * plant_capacity_mw   # usable MWh
+st.sidebar.caption(f"= {cap:,.3g} MWh usable, {C_RATE_PER_MWH * cap:,.3g} MW power"
+                   if cap >= 1 else
+                   f"= {cap * 1000:,.3g} kWh usable, {C_RATE_PER_MWH * cap * 1000:,.3g} kW power")
 
 if "seed" not in st.session_state:
     st.session_state.seed = 20260614
@@ -413,6 +539,12 @@ using_real = real_forecast is not None and real_actual is not None
 if using_real:
     forecast, actual = real_forecast, real_actual
     hours = np.arange(BLOCKS) * DT
+    # The real gap between the two series, as % of contracted capacity --
+    # what Grid Intelligence reports instead of the hidden slider's default.
+    _gap_pct = [abs(a_ - f_) / plant_capacity_mw * 100 for a_, f_ in zip(actual, forecast)]
+    _day = [g for g, f_ in zip(_gap_pct, forecast) if f_ > 0.01 * plant_capacity_mw]
+    real_gap_mean_pct = float(np.mean(_day)) if _day else 0.0
+    real_gap_max_pct = max(_gap_pct)
 else:
     # Generation is capped at what the plant can genuinely produce, not the
     # contracted figure -- AvC (plant["plant_mw"], used throughout the DSM
@@ -447,11 +579,26 @@ s4_trigger_mw = discharge_trigger_mw(plant, dsm_cfg, s4_cfg,
                                      fresh_battery({"batteryUsableCapacity": float(cap)}))
 s4_trigger_pct = (100 * s4_trigger_mw / plant["plant_mw"]
                   if s4_trigger_mw != float("inf") else None)
+s4_charge_mw = charge_trigger_mw(plant, dsm_cfg, s4_cfg,
+                                 fresh_battery({"batteryUsableCapacity": float(cap)}))
+
+
+def _mw_text(mw):
+    return f"{mw:.2f} MW" if mw >= 1 else f"{mw * 1000:.2f} kW"
+
+
 s4_trigger_text = ("never discharges at these costs -- no CERC band's penalty "
                    "exceeds the cost of stored energy"
                    if s4_trigger_pct is None else
                    f"discharges only for shortfalls beyond {s4_trigger_pct:.0f}% of "
-                   f"Available Capacity ({s4_trigger_mw:.2f} MW)")
+                   f"Available Capacity ({_mw_text(s4_trigger_mw)})")
+s4_charge_text = ("never stores excess -- the grid always pays more for it than "
+                  "storing keeps" if s4_charge_mw == float("inf") else
+                  f"stores only excess beyond {100 * s4_charge_mw / plant['plant_mw']:.0f}% "
+                  f"of Available Capacity ({_mw_text(s4_charge_mw)}), where the grid "
+                  f"pays less for it than storing keeps"
+                  if s4_cfg.get("discharge_trigger") == "economic" else
+                  f"absorbs excess beyond the Band 1 edge ({_mw_text(s4_charge_mw)})")
 
 results = {"S1 - PPA only": r1, "S2 - Battery buffer": r2, "S3 - Time windows": r3,
           "S4 - Real-time Controller": r4}
@@ -572,8 +719,11 @@ with hcol2:
         if st.button("Refresh"):
             st.rerun()
 
-prov = "real uploaded generation data" if using_real else "synthetic weather day (upload a real one from the left panel)"
-st.caption(f"{plant_capacity_mw:g} MW plant - flat-rate PPA - CERC DSM 2024 "
+prov = (real_source_note or "real uploaded generation data") if using_real \
+    else "synthetic weather day (upload a real one from the left panel)"
+_plant_size = (f"{plant_capacity_mw:g} MW" if plant_capacity_mw >= 1
+               else f"{plant_capacity_mw * 1000:g} kW")
+st.caption(f"{_plant_size} plant - flat-rate PPA - CERC DSM 2024 "
           f"settlement per 15-min block - {prov}")
 
 
@@ -779,7 +929,7 @@ with tab_sim:
             elif name == "S4 - Real-time Controller":
                 scenario_card(name, r, compare_to=p1,
                               badge=f"Reactive, no foresight: S4 {s4_trigger_text}, "
-                                    f"and absorbs excess beyond the Band 1 edge.")
+                                    f"and {s4_charge_text}.")
             elif name == "S3 - Time windows":
                 # Show S3's OWN line items and result, with a badge saying
                 # whether it actually ran today -- otherwise a held-back S3
@@ -1215,16 +1365,40 @@ with tab_sim:
             "'single-day focus' limitation: a real investment decision should "
             "look at this distribution, not one day."
         )
-        n_days = st.slider("Number of days to backtest", 5, 60, 20, 5)
+        # With a forecast-engine file loaded, backtest its REAL days; otherwise
+        # synthetic weather days (said plainly, so a single uploaded day isn't
+        # mistaken for the source of these results).
+        if engine_days_mw:
+            real_days = list(engine_days_mw)
+            max_days = len(real_days)
+            n_days = (st.slider("Number of real days to backtest", 1, max_days,
+                                max_days, 1) if max_days > 1 else 1)
+            bt_source = f"real:{len(real_days)}:{plant_capacity_mw}"
+            st.caption(f"Runs on the uploaded forecast-engine file: the first "
+                       f"{n_days} of its {max_days} complete days.")
+        else:
+            n_days = st.slider("Number of days to backtest", 5, 60, 20, 5)
+            bt_source = "synthetic"
+            if using_real:
+                st.caption(":orange[A single uploaded day can't be backtested, so this "
+                           "runs synthetic weather days at a 12% deviation. Use the "
+                           "'Forecast-engine file' option to backtest real days.]")
         run_backtest = st.button("Run backtest")
 
         if run_backtest:
-            rng_master = np.random.default_rng(2026)
-            seeds = rng_master.integers(1, int(1e9), size=n_days)
+            if bt_source == "synthetic":
+                rng_master = np.random.default_rng(2026)
+                seeds = rng_master.integers(1, int(1e9), size=n_days)
+                bt_days = [(i + 1, int(sd), None) for i, sd in enumerate(seeds)]
+            else:
+                bt_days = [(d, None, engine_days_mw[d]) for d in real_days[:n_days]]
             rows = []
             progress = st.progress(0.0, text="Running backtest...")
-            for i, seed in enumerate(seeds):
-                bt_fc, bt_act, _ = make_day(int(seed), err, plant["plant_mw"])
+            for i, (bt_label, seed, real_pair) in enumerate(bt_days):
+                if real_pair is None:
+                    bt_fc, bt_act, _ = make_day(seed, err, plant["plant_mw"])
+                else:
+                    bt_fc, bt_act = real_pair
                 bt_r1 = run_s1(bt_fc, bt_act, plant, dsm_cfg, s1_cfg)
                 bt_r2 = run_s2(bt_fc, bt_act, plant, dsm_cfg, s2_cfg,
                               fresh_battery({"batteryUsableCapacity": float(cap)}))
@@ -1234,7 +1408,7 @@ with tab_sim:
                 bt_r3 = bt_r3_raw if bt_deployed else bt_r1
                 bt_r4 = run_s4(bt_fc, bt_act, plant, dsm_cfg, s4_cfg,
                                fresh_battery({"batteryUsableCapacity": float(cap)}))
-                row = {"day": i + 1, "seed": int(seed),
+                row = {"day": bt_label, "seed": seed,
                       "S1": bt_r1.total("profit"), "S2": bt_r2.total("profit"),
                       "S3": bt_r3.total("profit"), "S4": bt_r4.total("profit"),
                       "S3_battery_used": bt_deployed}
@@ -1252,8 +1426,11 @@ with tab_sim:
 
             bt_df = pd.DataFrame(rows)
             st.session_state["backtest_df"] = bt_df
+            st.session_state["backtest_source"] = bt_source
 
-        if "backtest_df" in st.session_state:
+        # Only show results that came from the data currently selected.
+        if ("backtest_df" in st.session_state
+                and st.session_state.get("backtest_source") == bt_source):
             bt_df = st.session_state["backtest_df"]
             scen_cols = [c for c in ["S1", "S2", "S3", "S4", "S5"]
                         if c in bt_df.columns and bt_df[c].notna().any()]
@@ -1300,7 +1477,9 @@ with tab_sim:
                                             dash=dash))
             fig_bt.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10),
                                 legend=dict(orientation="h", y=1.12),
-                                xaxis_title="Backtest day", yaxis_title="Profit (Rs)")
+                                xaxis_title=("Date (IST)" if bt_source != "synthetic"
+                                             else "Backtest day"),
+                                yaxis_title="Profit (Rs)")
             st.plotly_chart(fig_bt, use_container_width=True, key="backtest_chart")
 
             if "S3" in bt_df.columns:
@@ -1331,8 +1510,11 @@ with tab_sim:
         pen1, pen2 = r1.total("dsm_penalty"), r2.total("dsm_penalty")
         gross1 = max(r1.total("ppa_revenue"), 1.0)
         rte_loss_pct = (1 - fresh_battery({"batteryUsableCapacity": float(cap)}).rte) * 100
+        gap_desc = (f"the real Actual-vs-Scheduled gap (averaging {real_gap_mean_pct:.1f}% "
+                    f"of capacity in daylight, {real_gap_max_pct:.0f}% at worst)"
+                    if using_real else f"a {err}% Actual-vs-Scheduled deviation")
         lines = [
-            f"On this weather day, a {err}% Actual-vs-Scheduled deviation cost the "
+            f"On this weather day, {gap_desc} cost the "
             f"plant Rs {pen1:,.0f} in DSM penalty under S1 -- "
             f"{100 * pen1 / gross1:.1f}% of gross PPA revenue. (This is the loss versus "
             f"delivering exactly to schedule; the larger 'DSM net' line in the cards "
