@@ -43,6 +43,30 @@ def discharge_trigger_mw(plant, dsm_cfg: DsmConfig, scen: dict,
     return float("inf")
 
 
+def charge_trigger_mw(plant, dsm_cfg: DsmConfig, scen: dict,
+                      battery: Battery) -> float:
+    """Excess (MW) beyond which S4 absorbs generation into the battery.
+
+    "band1": anything beyond the Band 1 edge (the original rule).
+    "economic": only beyond the band edge where exporting earns LESS than
+    storing keeps. A grid kWh stored is worth RTE x tariff once it comes
+    back out (the same value the ledger credits for stored energy), minus
+    wear on the eta kWh that reach the cells. Over-injection in Band 2 is
+    still paid 0.9x, so storing it loses money; Band 4 is paid nothing."""
+    avc_mw = plant["plant_mw"]
+    edges_pct = list(dsm_cfg.bands.edges_pct)
+    if scen.get("discharge_trigger", "band1") != "economic":
+        return avc_mw * edges_pct[0] / 100.0
+    rate = plant["ppa_rate_inr_per_kwh"]
+    deg = scen.get("degradation_inr_per_kwh", 2.5)
+    keep_x = battery.rte - (deg * 0.5 * battery.eta) / rate
+    lower_edges = [0.0] + edges_pct
+    for k, over_rate in enumerate(dsm_cfg.bands.over_rates):
+        if over_rate < keep_x:
+            return avc_mw * lower_edges[k] / 100.0
+    return float("inf")
+
+
 def run_s4(forecast, actual, plant, dsm_cfg: DsmConfig, scen: dict,
            battery: Battery) -> ScenarioResult:
     """S4 - Real-time reactive controller. Unlike S5 (perfect foresight,
@@ -82,7 +106,9 @@ def run_s4(forecast, actual, plant, dsm_cfg: DsmConfig, scen: dict,
                     live tariff, degradation cost and RTE, so it moves with
                     the sliders. If no band's rate exceeds that cost, S4
                     never discharges.
-    Excess beyond the Band 1 edge is absorbed in both modes. (Absorbing
+    The same setting governs charging (see charge_trigger_mw): "band1"
+    absorbs any excess beyond the Band 1 edge; "economic" absorbs only
+    excess the grid would pay less for than the battery keeps. (Absorbing
     smaller excess to refill the reserve was tested and loses money: Band 1
     over-injection is already paid at the full contract rate.)"""
     battery.soc_mwh = battery.usable_capacity_mwh * 0.5
@@ -91,9 +117,8 @@ def run_s4(forecast, actual, plant, dsm_cfg: DsmConfig, scen: dict,
     sched = list(forecast)  # fixed at forecast -- no foresight, unlike S5
     avc_mw = plant["plant_mw"]  # AvC(MWh) = plant_mw * DT; in MW terms this IS plant_mw
     edges_pct = list(dsm_cfg.bands.edges_pct)
-    band1_edge_pct = edges_pct[0] / 100.0  # real config value, e.g. 0.05
-    threshold_mw = avc_mw * band1_edge_pct
     discharge_threshold_mw = discharge_trigger_mw(plant, dsm_cfg, scen, battery)
+    charge_threshold_mw = charge_trigger_mw(plant, dsm_cfg, scen, battery)
 
     delivered, soc_series, thr = [], [], []
     for t in range(BLOCKS):
@@ -106,10 +131,10 @@ def run_s4(forecast, actual, plant, dsm_cfg: DsmConfig, scen: dict,
             need = gap_mw - discharge_threshold_mw
             dis = battery.discharge(need)
             net_delivered = actual[t] + dis
-        elif -gap_mw > threshold_mw:
-            # Excess beyond Band 1 -- charge just enough to pull the gap
-            # back down to the Band 1 edge.
-            need = (-gap_mw) - threshold_mw
+        elif -gap_mw > charge_threshold_mw:
+            # Excess past the charge trigger -- charge just enough to pull
+            # the gap back to that edge.
+            need = (-gap_mw) - charge_threshold_mw
             accepted = battery.charge(need)
             net_delivered = actual[t] - accepted
         else:
