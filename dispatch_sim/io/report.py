@@ -34,11 +34,12 @@ COLS = [  # (header, LedgerRow attr, number format)
     ("soc_mwh", "soc_mwh", MWH),
     ("degradation", "degradation", INR),
     ("om", "om", INR),
+    ("battery_stock", "inventory_inr", INR),
     ("profit", "profit", INR),
 ]
 SUM_COLS = ["scheduled_mwh", "actual_gen_mwh", "delivered_mwh", "ppa_revenue",
             "dsm_receivable", "dsm_payable", "dsm_penalty", "degradation",
-            "om", "profit"]
+            "om", "battery_stock", "profit"]
 
 
 def write_scenario_xlsx(result: ScenarioResult, path: str | Path) -> None:
@@ -86,7 +87,8 @@ def write_comparison_xlsx(results: list[ScenarioResult], path: str | Path) -> No
     ws = wb.active
     ws.title = "comparison"
     headers = ["scenario", "gross_ppa", "dsm_receivable", "dsm_payable",
-               "degradation", "om", "profit_per_day", "profit_per_year_330d"]
+               "degradation", "om", "battery_stock", "profit_per_day",
+               "profit_per_year_330d"]
     for j, h in enumerate(headers, start=1):
         c = ws.cell(row=1, column=j, value=h)
         c.font, c.fill = HEAD, HEAD_FILL
@@ -94,16 +96,18 @@ def write_comparison_xlsx(results: list[ScenarioResult], path: str | Path) -> No
 
     for i, res in enumerate(results, start=2):
         vals = [res.name, res.total("ppa_revenue"), res.total("dsm_receivable"),
-                res.total("dsm_payable"), res.total("degradation"), res.total("om")]
+                res.total("dsm_payable"), res.total("degradation"), res.total("om"),
+                res.total("inventory_inr")]
         for j, v in enumerate(vals, start=1):
             c = ws.cell(row=i, column=j, value=v)
             c.font = ARIAL
             if j > 1:
                 c.number_format = INR
         # profit as a live formula from this row's components
-        c = ws.cell(row=i, column=7, value=f"=B{i}+C{i}-D{i}-E{i}-F{i}")
+        # battery_stock (G) is signed: negative when opening stock was used up
+        c = ws.cell(row=i, column=8, value=f"=B{i}+C{i}-D{i}-E{i}-F{i}+G{i}")
         c.font, c.number_format = ARIAL, INR
-        c = ws.cell(row=i, column=8, value=f"=G{i}*330")
+        c = ws.cell(row=i, column=9, value=f"=H{i}*330")
         c.font, c.number_format = ARIAL, INR
 
     n = len(results) + 2

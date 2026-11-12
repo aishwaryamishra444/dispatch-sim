@@ -36,6 +36,12 @@ class LedgerRow:
     degradation: float
     om: float
     profit: float
+    # End-of-day battery stock adjustment (INR, signed). Non-zero only for
+    # strategies that start the day with energy already stored (S4): energy
+    # drawn from that opening stock was not generated today, so it is charged
+    # back at what it would cost to refill it; energy left above the opening
+    # level is credited. Booked on the last block.
+    inventory_inr: float = 0.0
 
 
 @dataclass
@@ -59,7 +65,8 @@ def build_ledger(name: str, schedule_mw: Sequence[float],
                  block_throughput_mwh: Sequence[float],
                  plant: dict, dsm_cfg: DsmConfig,
                  degradation_inr_per_kwh: float,
-                 config_snapshot: dict) -> ScenarioResult:
+                 config_snapshot: dict,
+                 end_inventory_inr: float = 0.0) -> ScenarioResult:
     avc = plant["plant_mw"] * DT
     rate = plant["ppa_rate_inr_per_kwh"]
     om_block = plant["om_inr_per_day"] / BLOCKS
@@ -72,7 +79,8 @@ def build_ledger(name: str, schedule_mw: Sequence[float],
     for t, s in enumerate(day.blocks):
         ppa = schedule_mw[t] * DT * rate * 1000.0
         deg = block_throughput_mwh[t] * 1000.0 * degradation_inr_per_kwh * 0.5
-        profit = ppa + s.receivable_inr - s.payable_inr - deg - om_block
+        inv = end_inventory_inr if t == BLOCKS - 1 else 0.0
+        profit = ppa + s.receivable_inr - s.payable_inr - deg - om_block + inv
         rows.append(LedgerRow(
             block=t, time=block_time(t),
             scheduled_mwh=schedule_mw[t] * DT,
@@ -86,6 +94,6 @@ def build_ledger(name: str, schedule_mw: Sequence[float],
             dsm_payable=s.payable_inr,
             dsm_penalty=s.penalty_inr,
             soc_mwh=None if soc_mwh is None else soc_mwh[t],
-            degradation=deg, om=om_block, profit=profit,
+            degradation=deg, om=om_block, profit=profit, inventory_inr=inv,
         ))
     return ScenarioResult(name=name, rows=rows, config_snapshot=config_snapshot)

@@ -1,4 +1,4 @@
-streamlit
+streamlit>=1.40,<2  # tested on 1.67; unpinned upgrades can break the page (use_container_width is being removed)
 plotly
 pandas
 numpy
@@ -6,4 +6,4 @@ pyyaml
 openpyxl
 pytest
 gymnasium
-pulp
+pulp>=2.7,<4  # PuLP 4.x removed LpVariable(lowBound=..., upBound=...); lp_dispatch.py needs the 2.x/3.x API
