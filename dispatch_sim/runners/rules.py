@@ -50,6 +50,7 @@ def run_s4(forecast, actual, plant, dsm_cfg: DsmConfig, scen: dict,
     reserve for exactly this reason, rather than starting every day at
     zero."""
     battery.soc_mwh = battery.usable_capacity_mwh * 0.5
+    opening_soc_mwh = battery.soc_mwh
 
     sched = list(forecast)  # fixed at forecast -- no foresight, unlike S5
     avc_mw = plant["plant_mw"]  # AvC(MWh) = plant_mw * DT; in MW terms this IS plant_mw
@@ -82,9 +83,22 @@ def run_s4(forecast, actual, plant, dsm_cfg: DsmConfig, scen: dict,
         soc_series.append(battery.soc_mwh)
         thr.append(battery.throughput_mwh - thr0)
 
+    # The 50% opening reserve is not free energy. Value the day's net change
+    # in stored energy so S4 is compared fairly with strategies that start
+    # empty: a drawdown is charged at the PPA revenue foregone to refill it
+    # (delta / one-way efficiency); a net gain is credited at what it could
+    # deliver (delta x one-way efficiency).
+    rate_inr_per_mwh = plant["ppa_rate_inr_per_kwh"] * 1000.0
+    delta_mwh = battery.soc_mwh - opening_soc_mwh
+    if delta_mwh < 0:
+        inventory_inr = delta_mwh / battery.eta * rate_inr_per_mwh
+    else:
+        inventory_inr = delta_mwh * battery.eta * rate_inr_per_mwh
+
     return build_ledger(scen["name"], sched, actual, delivered, soc_series,
                         thr, plant, dsm_cfg,
-                        scen.get("degradation_inr_per_kwh", 2.5), scen)
+                        scen.get("degradation_inr_per_kwh", 2.5), scen,
+                        end_inventory_inr=inventory_inr)
 
 
 def run_s2(forecast, actual, plant, dsm_cfg: DsmConfig, scen: dict,

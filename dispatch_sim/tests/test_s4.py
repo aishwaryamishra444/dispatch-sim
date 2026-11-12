@@ -133,7 +133,13 @@ class TestS4ReactiveController:
         nothing at all (profit -Rs 74 vs S1). Starting at a 50% reserve
         fixed it completely (penalty eliminated, +Rs 42,590 vs S1 on
         that same day). This test locks in the starting condition itself
-        so that fix can't silently regress."""
+        so that fix can't silently regress.
+
+        Since the opening reserve is now valued (see
+        test_opening_reserve_is_not_free_energy), the guard checks the
+        operational effect the reserve exists for -- the battery is used
+        and the DSM penalty falls -- rather than total profit, which now
+        includes the cost of refilling that reserve."""
         plant, dsm, battery = make_plant(), make_dsm(), make_battery()
         # a day of ONLY shortfalls -- the worst case for a reactive
         # controller, with zero opportunity to self-charge from excess
@@ -143,7 +149,35 @@ class TestS4ReactiveController:
                    {"name": "S4", "degradation_inr_per_kwh": 2.5}, battery)
         from dispatch_sim.runners.rules import run_s1
         r1 = run_s1(forecast, actual, plant, dsm, {"name": "S1"})
-        assert r4.total("profit") > r1.total("profit"), (
-            "S4 must genuinely beat doing nothing on a pure-shortfall day -- "
+        assert r4.total("dsm_penalty") < r1.total("dsm_penalty"), (
+            "S4 must cut the DSM penalty on a pure-shortfall day -- "
             "if this fails, the starting-reserve fix has regressed"
         )
+        operating = r4.total("profit") - r4.total("inventory_inr")
+        assert operating > r1.total("profit")
+
+    def test_opening_reserve_is_not_free_energy(self):
+        """S4 starts half full while S2/S3/S5 start empty. Energy drawn from
+        that opening stock wasn't generated today, so the day is charged
+        what it would cost to refill it: the SoC drop / one-way efficiency,
+        at the PPA rate (i.e. the PPA revenue foregone to recharge it)."""
+        plant, dsm, battery = make_plant(), make_dsm(), make_battery()
+        forecast = [5.0] * BLOCKS
+        actual = [3.0] * BLOCKS
+        r4 = run_s4(forecast, actual, plant, dsm,
+                   {"name": "S4", "degradation_inr_per_kwh": 2.5}, battery)
+        opening = 40.0 * 0.5
+        closing = r4.rows[-1].soc_mwh
+        assert closing < opening
+        expected = -(opening - closing) / math.sqrt(0.81) * 2.60 * 1000.0
+        assert abs(r4.total("inventory_inr") - expected) < 1e-6
+        # booked once, on the last block, and included in profit
+        assert all(row.inventory_inr == 0.0 for row in r4.rows[:-1])
+        assert abs(sum(row.profit for row in r4.rows) - r4.total("profit")) < 1e-6
+
+    def test_energy_neutral_day_has_no_stock_adjustment(self):
+        """With no deviation the battery never moves, so nothing is booked."""
+        plant, dsm, battery = make_plant(), make_dsm(), make_battery()
+        r4 = run_s4([5.0] * BLOCKS, [5.0] * BLOCKS, plant, dsm,
+                   {"name": "S4", "degradation_inr_per_kwh": 2.5}, battery)
+        assert r4.total("inventory_inr") == 0.0
