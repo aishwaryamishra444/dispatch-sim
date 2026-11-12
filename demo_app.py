@@ -233,47 +233,30 @@ def fresh_battery(spec_overrides=None):
                    soc_min_pct=spec["socMinPct"], soc_max_pct=spec["socMaxPct"])
 
 
-# ---------------------------------------------------------------- sidebar
-st.sidebar.markdown(
-    f'<div class="au-mark-row">{au_mark(30)}'
-    f'<div><div class="au-mark-text">Atria University</div>'
-    f'<div class="au-mark-sub">Centre of Excellence</div></div></div>',
-    unsafe_allow_html=True)
-st.sidebar.title("Agentic Grid Simulator")
-st.sidebar.caption("Baseline Scenarios S1-S4 - CERC DSM 2024")
+# ---------------------------------------------------------------- settings
+# All inputs live on the "Set up" page, but every page needs them. Widget
+# values normally vanish when their page isn't shown, so each input is kept
+# in session_state under its widget key and re-asserted on every run.
+ss = st.session_state
 
-plant_capacity_mw = st.sidebar.number_input(
-    "Contracted / nameplate capacity (MW)", min_value=0.001, max_value=500.0,
-    value=10.0, step=0.001, format="%.4f",
-    help="The capacity in your PPA paperwork. This is the denominator CERC "
-         "uses for deviation percentage (Regulation 6(2)) -- Available "
-         "Capacity = this x 0.25h per block. O&M below scales proportionally "
-         "from this too."
-)
-real_capacity_mw = st.sidebar.number_input(
-    "Real achievable capacity (MW)", min_value=0.001, max_value=500.0,
-    value=plant_capacity_mw, step=0.001, format="%.4f",
-    help="What the plant can genuinely produce -- may be lower than the "
-         "contracted figure above (inverter clipping, site losses, panel "
-         "derating). This caps actual generation; the contracted figure "
-         "above still sets the DSM penalty denominator -- these are two "
-         "genuinely different numbers when they differ, per PPA regulation."
-)
-if real_capacity_mw > plant_capacity_mw:
-    st.sidebar.caption(":orange[Real capacity exceeds contracted capacity -- "
-                       "generation will be capped at the contracted figure, "
-                       "since you can't legally exceed what's contracted.]")
+MODE_SYNTH = "Synthetic (demo)"
+MODE_ENGINE = "Forecast-engine file (multi-day)"
+MODE_SINGLE = "Upload real day"
+SCALE_SCALED = "Scaled to the contracted plant"
+SCALE_OWN = "Its own size (contracted capacity set to match)"
 
-st.sidebar.divider()
-st.sidebar.subheader("Data source")
-data_mode = st.sidebar.radio(
-    "Generation data",
-    ["Synthetic (demo)", "Forecast-engine file (multi-day)", "Upload real day"],
-    label_visibility="collapsed",
-    help="Real data replaces the synthetic weather day used for the demo - "
-         "the settlement math is unchanged either way. 'Forecast-engine file' "
-         "takes the forecasting team's export as-is (many days, kW or MW, UTC "
-         "or IST); 'Upload real day' takes one day as two time,mw files.")
+DEFAULTS = {
+    "plant_cap": 10.0, "real_cap": 10.0, "data_mode": MODE_SYNTH, "err": 12,
+    "ppa": 2.60, "bess_hours": 4.0, "deg_calc_mode": "Cycles",
+    "deg_price": 16_320.0, "deg_cycles": 6000.0, "deg_years": 15.0, "deg_cpd": 1.0,
+    "engine_unit": "kW", "engine_tz": "UTC", "engine_src_cap": 5.0,
+    "engine_scale": SCALE_SCALED, "seed": 20260614,
+}
+for _k, _v in DEFAULTS.items():
+    ss.setdefault(_k, _v)
+for _k in list(DEFAULTS) + ["engine_day"]:
+    if _k in ss:
+        ss[_k] = ss[_k]   # keep the value alive while its widget isn't on screen
 
 
 @st.cache_data(show_spinner=False)
@@ -289,245 +272,173 @@ def _nice_ceiling(x: float) -> float:
     return float(np.ceil(x / step - 1e-9) * step)
 
 
+def _engine_has_offset(raw: bytes) -> bool:
+    try:
+        head = read_table(raw)
+        t_c, _, _ = detect_columns(head.columns)
+        return bool(t_c is not None and head[t_c].astype(str)
+                    .str.contains(r"(?:[+-]\d{2}:?\d{2}|Z)$", regex=True).all())
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _reset_engine_capacity():
+    """Default 'this plant's capacity' to the file's peak, rounded up, in the
+    chosen unit -- re-run whenever the file or its unit changes."""
+    try:
+        eng_ = _parse_engine_cached(ss["engine_raw"], ss["engine_unit"], ss["engine_tz"])
+        peak = eng_.peak_mw * (1000 if ss["engine_unit"] == "kW" else 1)
+        ss["engine_src_cap"] = _nice_ceiling(peak)
+    except Exception:  # noqa: BLE001 -- the Setup page shows the parse error
+        pass
+
+
+def _on_engine_upload():
+    f = ss.get("engine_upload")
+    if f is None:
+        for k in ("engine_raw", "engine_name", "engine_day"):
+            ss.pop(k, None)
+        return
+    _ingest_engine_bytes(f.getvalue(), f.name)
+
+
+def _ingest_engine_bytes(raw: bytes, name: str):
+    ss["engine_raw"], ss["engine_name"] = raw, name
+    ss.pop("engine_day", None)
+    try:
+        head = read_table(raw)
+        _, a_c, f_c = detect_columns(head.columns)
+        ss["engine_unit"] = (detect_unit(a_c, f_c) if a_c and f_c else None) or "kW"
+    except Exception:  # noqa: BLE001
+        pass
+    _reset_engine_capacity()
+
+
+def _on_single_upload(which: str):
+    f = ss.get(f"{which}_upload")
+    if f is None:
+        ss.pop(f"single_{which}", None)
+        ss.pop(f"single_{which}_name", None)
+        ss.pop(f"single_{which}_error", None)
+        return
+    try:
+        ss[f"single_{which}"] = load_series_csv_buffer(f, f.name)
+        ss[f"single_{which}_name"] = f.name
+        ss.pop(f"single_{which}_error", None)
+    except Exception as e:  # noqa: BLE001
+        ss.pop(f"single_{which}", None)
+        ss[f"single_{which}_error"] = str(e)
+
+
+# ---- derive this run's inputs from the saved settings (no widgets here) ----
+plant_capacity_mw = float(ss["plant_cap"])
+real_capacity_mw = float(ss["real_cap"])
+data_mode = ss["data_mode"]
+err = int(ss["err"])
+ppa = float(ss["ppa"])
+bess_hours = float(ss["bess_hours"])
+
 real_forecast, real_actual = None, None
 engine_days_mw = None        # {day: (forecast_mw, actual_mw)} at simulator scale
 selected_engine_day = None
 real_source_note = ""
-if data_mode == "Forecast-engine file (multi-day)":
-    st.sidebar.caption("One CSV with a timestamp column plus actual and forecast "
-                       "generation columns, 15-min resolution, any number of days "
-                       "-- e.g. `date, power_generation_actual_kw, "
-                       "forecast_generation_kw`.")
-    eng_file = st.sidebar.file_uploader("Forecast-engine export (CSV)", type=["csv"],
-                                        key="engine_upload")
-    if eng_file is not None:
-        raw = eng_file.getvalue()
-        try:
-            head = read_table(raw)
-            t_c, a_c, f_c = detect_columns(head.columns)
-            guess = detect_unit(a_c or "", f_c or "") if a_c and f_c else None
-            unit = st.sidebar.radio("Values are in", ["kW", "MW"], horizontal=True,
-                                    index=0 if guess != "MW" else 1, key="engine_unit",
-                                    help="Read from the column names when they say "
-                                         "(e.g. '_kw'); check it if they don't.")
-            has_offset = (t_c is not None and head[t_c].astype(str)
-                          .str.contains(r"(?:[+-]\d{2}:?\d{2}|Z)$", regex=True).all())
-            naive_tz = "UTC"
-            if has_offset:
-                st.sidebar.caption("Timestamps carry a UTC offset -- converted to "
-                                   "India time (IST) automatically.")
-            else:
-                naive_tz = st.sidebar.radio("Timestamps are in", ["UTC", "IST"],
-                                            horizontal=True, key="engine_tz")
-            eng = _parse_engine_cached(raw, unit, naive_tz)
-            src_peak_mw = eng.peak_mw
-            msg = f"{len(eng.days)} complete days loaded"
-            if eng.skipped:
-                msg += f"; {len(eng.skipped)} incomplete days skipped"
-            st.sidebar.success(msg + ".")
-            if eng.skipped or eng.filled_blocks:
-                with st.sidebar.expander("Data gaps"):
-                    if eng.filled_blocks:
-                        st.caption(f"{sum(eng.filled_blocks.values())} isolated missing "
-                                   f"readings on {len(eng.filled_blocks)} days were "
-                                   f"filled by interpolating their neighbours.")
-                    for d, why in eng.skipped.items():
-                        st.caption(f"{d}: skipped -- {why}")
-
-            src_cap_mw = st.sidebar.number_input(
-                f"This plant's capacity ({unit})", min_value=0.001,
-                value=_nice_ceiling(src_peak_mw * (1000 if unit == 'kW' else 1)),
-                step=0.5 if unit == "kW" else 0.1, format="%.3f", key="engine_src_cap",
-                help=f"The file's peak is {src_peak_mw * (1000 if unit == 'kW' else 1):.3f} "
-                     f"{unit}; the default rounds that up. Use the real nameplate "
-                     f"if you know it -- it decides how the profile is scaled.")
-            src_cap_mw = src_cap_mw / (1000 if unit == "kW" else 1)
-            scale_mode = st.sidebar.radio(
-                "Run it as", [f"Scaled to the {plant_capacity_mw:g} MW contracted plant",
-                              "Its own size (sets contracted capacity to match)"],
-                key="engine_scale",
-                help="Scaling keeps the real shape and forecast error but expresses "
-                     "it on the contracted plant above, so battery sizes and rupee "
-                     "figures stay comparable with the demo.")
-            if scale_mode.startswith("Scaled"):
-                k_scale = plant_capacity_mw / src_cap_mw
-            else:
-                k_scale = 1.0
-                plant_capacity_mw = src_cap_mw
-                real_capacity_mw = src_cap_mw
-            engine_days_mw = {d: ([x * k_scale for x in fc], [x * k_scale for x in ac])
-                              for d, (fc, ac) in eng.days.items()}
-            day_list = list(engine_days_mw)
-            pick_day = st.sidebar.selectbox("Day", day_list, key="engine_day",
-                                            help="IST calendar days with all 96 blocks.")
-            real_forecast, real_actual = engine_days_mw[pick_day]
-            selected_engine_day = pick_day
-            real_source_note = (f"forecast-engine data, {pick_day} (IST)"
-                                + (f", scaled from {src_cap_mw * 1000:g} kW"
-                                   if k_scale != 1.0 and src_cap_mw < 1 else
-                                   f", scaled from {src_cap_mw:g} MW" if k_scale != 1.0 else ""))
-        except Exception as e:  # noqa: BLE001 -- show the reason, keep the demo up
-            st.sidebar.error(f"Couldn't read that file: {e}")
-    else:
-        st.sidebar.caption("Showing the synthetic day below until a file is uploaded.")
-
-elif data_mode == "Upload real day":
-    st.sidebar.caption("CSV format: columns `time,mw` - 96 rows (15-min blocks), "
-                       "values in MW, times in IST. Same format the CLI "
-                       "(`--forecast`/`--actual`) expects.")
-    fc_file = st.sidebar.file_uploader("Forecast CSV (day-ahead schedule basis)",
-                                       type=["csv"], key="fc_upload")
-    act_file = st.sidebar.file_uploader("Actual generation CSV (telemetry)",
-                                        type=["csv"], key="act_upload")
-    if fc_file is not None:
-        try:
-            real_forecast = load_series_csv_buffer(fc_file, fc_file.name)
-            st.sidebar.success(f"Forecast: {len(real_forecast)} blocks loaded.")
-        except Exception as e:
-            st.sidebar.error(str(e))
-    if act_file is not None:
-        try:
-            real_actual = load_series_csv_buffer(act_file, act_file.name)
-            st.sidebar.success(f"Actual: {len(real_actual)} blocks loaded.")
-        except Exception as e:
-            st.sidebar.error(str(e))
-    if fc_file is None or act_file is None:
-        st.sidebar.caption("Upload both files to switch off synthetic data - "
-                           "showing the synthetic day below until then.")
-    elif real_forecast is not None and real_actual is not None:
-        real_source_note = f"uploaded day ({fc_file.name} / {act_file.name})"
+engine_error = None
+eng = None
+if data_mode == MODE_ENGINE and ss.get("engine_raw"):
+    try:
+        eng = _parse_engine_cached(ss["engine_raw"], ss["engine_unit"], ss["engine_tz"])
+    except Exception as e:  # noqa: BLE001
+        engine_error = str(e)
+    if eng is not None:
+        unit_k = 1000 if ss["engine_unit"] == "kW" else 1
+        src_cap_mw = max(float(ss["engine_src_cap"]), 1e-6) / unit_k
+        if ss["engine_scale"] != SCALE_OWN:
+            k_scale = plant_capacity_mw / src_cap_mw
+        else:
+            k_scale = 1.0
+            plant_capacity_mw = src_cap_mw
+            real_capacity_mw = src_cap_mw
+        engine_days_mw = {d: ([x * k_scale for x in fc], [x * k_scale for x in ac])
+                          for d, (fc, ac) in eng.days.items()}
+        if ss.get("engine_day") not in engine_days_mw:
+            ss["engine_day"] = next(iter(engine_days_mw))
+        selected_engine_day = ss["engine_day"]
+        real_forecast, real_actual = engine_days_mw[selected_engine_day]
+        src_txt = (f"{src_cap_mw * 1000:g} kW" if src_cap_mw < 1 else f"{src_cap_mw:g} MW")
+        real_source_note = (f"forecast-engine data, {selected_engine_day} (IST)"
+                            + (f", scaled from {src_txt}" if k_scale != 1.0 else ""))
+elif data_mode == MODE_SINGLE and ss.get("single_fc") and ss.get("single_act"):
+    real_forecast, real_actual = ss["single_fc"], ss["single_act"]
+    real_source_note = (f"uploaded day ({ss.get('single_fc_name')} / "
+                        f"{ss.get('single_act_name')})")
 
 # Unit / capacity sanity check for any real data: catches a kW file read as
 # MW, or a profile from a different-sized plant, before it silently produces
 # meaningless settlement numbers.
+data_warnings = []
 if real_forecast is not None and real_actual is not None:
     up_peak = max(max(real_forecast), max(real_actual))
     if up_peak > plant_capacity_mw * 1.02:
-        st.sidebar.warning(
+        data_warnings.append(
             f"This day peaks at {up_peak:.3f} MW -- above the {plant_capacity_mw:g} MW "
-            f"contracted capacity. Check the unit (kW vs MW) or raise the capacity "
-            f"above; deviation percentages will be wrong otherwise.")
-    elif up_peak < plant_capacity_mw * 0.10 and up_peak > 0:
-        st.sidebar.warning(
+            f"contracted capacity. Check the unit (kW vs MW) or raise the capacity; "
+            f"deviation percentages will be wrong otherwise.")
+    elif 0 < up_peak < plant_capacity_mw * 0.10:
+        data_warnings.append(
             f"This day peaks at only {up_peak:.4f} MW -- under 10% of the "
             f"{plant_capacity_mw:g} MW contracted capacity. If the values are kW or "
-            f"come from a smaller plant, use the 'Forecast-engine file' option to "
-            f"set the unit and scale, or lower the capacity above.")
+            f"come from a smaller plant, use the 'Forecast-engine file' option to set "
+            f"the unit and scale, or lower the capacity.")
 
-with st.sidebar.expander("Real IEX price upload (for future P2P scenarios)"):
-    st.caption("Baseline Scenarios S1-S4 are PPA-only per the team plan and do "
-              "not consume market price - this loader is here for Scenario 5 / "
-              "P2P work, not wired into today's profit numbers.")
-    iex_file = st.file_uploader(
-        "IEX Area Price / Market Snapshot", type=["csv", "xls", "xlsx"],
-        key="iex_upload",
-        help="Download from iexindia.com -> Market Data -> Day Ahead Market "
-             "-> Market Snapshot / Area Price.")
-    if iex_file is not None:
-        try:
-            iex_result = parse_iex_file(iex_file)
-            st.success(f"Parsed {iex_result.detected_rows} rows from "
-                      f"'{iex_file.name}' (column: {iex_result.source_columns['price']}). "
-                      f"Not yet applied to S1-S4 profit - reserved for Scenario 5.")
-        except IEXFormatError as e:
-            st.warning(f"Couldn't auto-detect columns: {e}")
-            if e.columns:
-                tcol = st.selectbox("Time column", e.columns, key="iex_tcol")
-                pcol = st.selectbox("Price column", e.columns, key="iex_pcol")
-                if st.button("Parse with these columns", key="iex_parse_btn"):
-                    try:
-                        iex_file.seek(0)
-                        r2 = parse_iex_file(iex_file, time_col=tcol, price_col=pcol)
-                        st.success(f"Parsed using '{tcol}' / '{pcol}'.")
-                    except Exception as e2:
-                        st.error(f"Still couldn't parse: {e2}")
-
-st.sidebar.divider()
-if data_mode == "Synthetic (demo)":
-    err = st.sidebar.slider("Generation Deviation: Actual vs Scheduled (%)", 3, 30, 12,
-                            help="How far actual generation lands from the day-ahead "
-                                 "schedule. This single input is what drives every DSM "
-                                 "penalty below -- it IS the 'Actual minus Scheduled' gap, "
-                                 "expressed as a percentage. Watch S1-S4 change as you "
-                                 "move it.")
+# Battery wear cost: price per kWh (scaled by capacity) over warranted cycles.
+usable_kwh = bess_hours * plant_capacity_mw * 1000
+capex = float(ss["deg_price"]) * usable_kwh
+if ss["deg_calc_mode"] == "Cycles":
+    warranted_cycles = float(ss["deg_cycles"])
 else:
-    # With real data, deviation is the literal gap between forecast and
-    # actual, not a slider's doing -- so the slider is hidden. err keeps its
-    # default only for the synthetic backtest fallback (single uploaded
-    # day); Grid Intelligence reports the real gap instead.
-    err = 12
-    st.sidebar.caption("Generation Deviation is hidden while using real "
-                      "data -- it's the literal gap between forecast and "
-                      "actual, not a slider's doing.")
-ppa = st.sidebar.slider("PPA tariff (Rs/kWh)", 2.0, 4.5, 2.60, 0.05)
+    warranted_cycles = float(ss["deg_years"]) * float(ss["deg_cpd"]) * 330
+computed_deg = capex / max(warranted_cycles, 1.0) / max(usable_kwh, 1e-9)
+DEG_MIN, DEG_MAX = 0.5, 6.0
+deg = min(max(computed_deg, DEG_MIN), DEG_MAX)
 
-with st.sidebar.expander("Battery degradation -- research & calculator"):
-    st.caption(
-        "**Or calculate from your own battery quote** -- linear "
-        "amortization (cost per cycle / usable capacity), the same "
-        "method used in peer-reviewed power systems literature."
-    )
-    calc_mode = st.radio("I know the warranty in:", ["Cycles", "Years"],
-                        horizontal=True, key="deg_calc_mode")
-    # Price is entered per kWh and multiplied by the BESS slider's capacity,
-    # so the total price scales with battery size. (A fixed total price
-    # against a moving capacity made Rs/kWh-cycled -- and S2/S3/S4/S5 wear
-    # cost -- swing 4x just from moving the capacity slider.)
-    price_per_kwh = st.number_input(
-        "Battery price (Rs per kWh usable)", min_value=1.0,
-        value=16_320.0, step=500.0, format="%.0f",
-        help="Default reflects IRENA's 2024 $192/kWh at ~Rs 85/$ -- "
-             "re-verify against a live quote for a final figure.")
-    usable_kwh = (float(st.session_state.get("bess_hours", 4.0))
-                  * plant_capacity_mw * 1000)
-    capex = price_per_kwh * usable_kwh
-    st.caption(f"Usable capacity follows the BESS slider: {usable_kwh:,.0f} kWh "
-               f"-> total price Rs {capex / 1e7:,.2f} crore.")
-    if calc_mode == "Cycles":
-        warranted_cycles = st.number_input("Warranted cycles", min_value=1.0,
-                                           value=6000.0, step=100.0)
-    else:
-        warranted_years = st.number_input("Warranted years", min_value=0.1,
-                                          value=15.0, step=0.5)
-        cycles_per_day = st.number_input("Assumed full cycles per day", min_value=0.01,
-                                         value=1.0, step=0.1,
-                                         help="Warranted cycles = years x cycles/day x "
-                                              "330 operating days/year (the same 330 "
-                                              "days used for every annualized figure).")
-        warranted_cycles = warranted_years * cycles_per_day * 330
-
-    cost_per_cycle = capex / warranted_cycles
-    computed_deg = cost_per_cycle / usable_kwh
-    DEG_MIN, DEG_MAX = 0.5, 6.0
-    deg = min(max(computed_deg, DEG_MIN), DEG_MAX)
-
-    st.markdown(f"**-> Degradation cost used: Rs {deg:.2f}/kWh cycled**")
-    if deg != computed_deg:
-        st.caption(f":orange[Your inputs give Rs {computed_deg:.2f}/kWh; the "
-                   f"simulator limits this to Rs {DEG_MIN:.2f}-{DEG_MAX:.2f} "
-                   f"and is using Rs {deg:.2f}.]")
-
-# Battery size is set in hours of the contracted capacity, so it stays
-# sensible for any plant: 4 h on the 10 MW default is the familiar 40 MWh,
-# and a 5 kW rooftop gets 20 kWh instead of an impossible 10 MWh minimum.
-bess_hours = st.sidebar.slider("BESS size (hours of plant capacity)", 0.5, 8.0, 4.0, 0.5,
-                               key="bess_hours",
-                               help="Usable energy = hours x contracted capacity. "
-                                    "Power is 0.5C (half the energy per hour).")
 cap = bess_hours * plant_capacity_mw   # usable MWh
-st.sidebar.caption(f"= {cap:,.3g} MWh usable, {C_RATE_PER_MWH * cap:,.3g} MW power"
-                   if cap >= 1 else
-                   f"= {cap * 1000:,.3g} kWh usable, {C_RATE_PER_MWH * cap * 1000:,.3g} kW power")
 
-if "seed" not in st.session_state:
-    st.session_state.seed = 20260614
-if st.sidebar.button("New weather day"):
-    st.session_state.seed = int(np.random.default_rng().integers(1e9))
 
-st.sidebar.divider()
-st.sidebar.caption("Engine: dispatch_sim (Reg 6(2)/8(4), 60+ unit tests). "
-                   "Same code path as the xlsx outputs - this UI adds nothing "
-                   "to the math.")
+def _size_text(mw: float) -> str:
+    return f"{mw:g} MW" if mw >= 1 else f"{mw * 1000:g} kW"
+
+
+def _energy_text(mwh: float) -> str:
+    return f"{mwh:,.3g} MWh" if mwh >= 1 else f"{mwh * 1000:,.3g} kWh"
+
+
+# ---- sidebar: brand + a short summary of what is being simulated ----------
+st.sidebar.markdown(
+    f'<div class="au-mark-row">{au_mark(30)}'
+    f'<div><div class="au-mark-text">Atria University</div>'
+    f'<div class="au-mark-sub">Centre of Excellence</div></div></div>',
+    unsafe_allow_html=True)
+st.sidebar.markdown("**Agentic Grid Simulator**")
+
+
+def sidebar_summary():
+    data_txt = {MODE_SYNTH: f"Synthetic day, {err}% forecast error",
+                MODE_ENGINE: (f"Forecast-engine file, {selected_engine_day}"
+                              if engine_days_mw else "Forecast-engine file (none loaded)"),
+                MODE_SINGLE: ("Uploaded day" if real_forecast is not None
+                              else "Single day (not uploaded yet)")}[data_mode]
+    st.sidebar.caption("**Simulating**")
+    st.sidebar.caption(
+        f"{_size_text(plant_capacity_mw)} plant · Rs {ppa:.2f}/kWh  \n"
+        f"{data_txt}  \n"
+        f"Battery {_energy_text(cap)} ({bess_hours:g} h) · wear Rs {deg:.2f}/kWh")
+    st.sidebar.page_link(PAGE_SETUP, label="Change settings", icon=":material/tune:")
+    st.sidebar.divider()
+    st.sidebar.caption("Engine: dispatch_sim · CERC DSM 2024 (Reg 6(2)/8(4)) · "
+                       "60+ automated tests. The app uses the same code as the "
+                       "xlsx reports; the UI adds nothing to the math.")
+
+
 
 # ---------------------------------------------------------------- run engine
 plant = load_yaml(CFG / "plant.yaml")
@@ -702,41 +613,9 @@ def solar_hero_html():
                     font-weight:600;letter-spacing:.08em;
                     border:1.5px solid rgba(255,255,255,.55);
                     border-radius:999px;padding:10px 26px;opacity:.9;">
-          SCROLL TO SIMULATE &#8595;</div>
+          SET UP IN 4 STEPS &#8595;</div>
       </div>
     </div>"""
-
-components.html(solar_hero_html(), height=420, scrolling=False)
-st.write("")
-
-# ---------------------------------------------------------------- header
-hcol1, hcol2 = st.columns([4, 2])
-with hcol1:
-    st.markdown(
-        '<div class="au-badge"><span class="au-dot"></span>Live simulation</div>',
-        unsafe_allow_html=True)
-with hcol2:
-    bcol1, bcol2 = st.columns(2)
-    comparison_export = pd.DataFrame({
-        "Scenario": list(results),
-        "Profit/day (INR)": [r.total("profit") for r in results.values()],
-        "DSM penalty (INR)": [r.total("dsm_penalty") for r in results.values()],
-        "Degradation (INR)": [r.total("degradation") for r in results.values()],
-    })
-    with bcol1:
-        st.download_button("Export CSV", comparison_export.to_csv(index=False),
-                           file_name="agentic_grid_results.csv")
-    with bcol2:
-        if st.button("Refresh"):
-            st.rerun()
-
-prov = (real_source_note or "real uploaded generation data") if using_real \
-    else "synthetic weather day (upload a real one from the left panel)"
-_plant_size = (f"{plant_capacity_mw:g} MW" if plant_capacity_mw >= 1
-               else f"{plant_capacity_mw * 1000:g} kW")
-st.caption(f"{_plant_size} plant - flat-rate PPA - CERC DSM 2024 "
-          f"settlement per 15-min block - {prov}")
-
 
 def _cuboid(cx, cy, cz, color, dx=0.26, dy=0.26, dz=0.22, name="", hover=""):
     """One solid 3D box (12-triangle mesh) representing a system node."""
@@ -835,17 +714,251 @@ def build_3d_diagram():
     )
     return fig
 
-tab_sim, tab_tech, tab_docs, tab_contact = st.tabs(
-    ["Simulation", "Technology", "Documentation", "Contact"])
+def _step(n: int, title: str, blurb: str):
+    st.markdown(f'<div class="au-step"><span class="au-step-n">{n}</span>'
+                f'<span class="au-step-t">{title}</span></div>', unsafe_allow_html=True)
+    st.caption(blurb)
 
-with tab_sim:
-    st.write("")
+
+def page_setup():
+    components.html(solar_hero_html(), height=360, scrolling=False)
+    st.markdown("### Set up your simulation")
     st.markdown(
-        "### :orange[Solar] + :green[Battery] Dispatch Simulator\n"
-        "A live digital twin of a solar-BESS plant's daily economics -- "
-        "simulating generation, storage, and grid settlement under India's "
-        "real CERC deviation penalty regulation."
-    )
+        "Four quick steps. Every input has a **?** next to it that explains what "
+        "it means. The defaults already work, so you can go straight to the "
+        "results and come back to change anything.")
+    if st.button("Skip to results with the defaults", icon=":material/arrow_forward:",
+                 key="skip_to_results"):
+        st.switch_page(PAGE_RESULTS)
+    st.write("")
+
+    # ---- 1. Plant ---------------------------------------------------------
+    with st.container(border=True):
+        _step(1, "Your plant", "How big the solar plant is on paper.")
+        st.number_input(
+            "Contracted capacity (MW)", min_value=0.001, max_value=500.0,
+            step=0.5, format="%.3f", key="plant_cap",
+            help="The plant size written in the power purchase agreement (PPA). "
+                 "CERC measures every deviation as a % of this, so it decides "
+                 "which penalty band a shortfall falls into. O&M cost scales "
+                 "with it too.")
+        with st.expander("Advanced: real achievable capacity"):
+            st.number_input(
+                "Real achievable capacity (MW)", min_value=0.001, max_value=500.0,
+                step=0.5, format="%.3f", key="real_cap",
+                help="What the plant can physically produce (inverter limits, "
+                     "panel losses). Caps generation on synthetic days only; "
+                     "penalties are still measured against the contracted figure.")
+            if ss["real_cap"] > ss["plant_cap"]:
+                st.caption(":orange[Above the contracted capacity -- generation "
+                           "will be capped at the contracted figure.]")
+        if data_mode == MODE_ENGINE and ss["engine_scale"] == SCALE_OWN and engine_days_mw:
+            st.caption(f":blue[Using the uploaded plant's own size "
+                       f"({_size_text(plant_capacity_mw)}) -- set in step 2.]")
+
+    # ---- 2. Generation data -----------------------------------------------
+    with st.container(border=True):
+        _step(2, "Generation data", "Where the forecast and the actual generation "
+                                    "come from.")
+        st.radio(
+            "Generation data", [MODE_SYNTH, MODE_ENGINE, MODE_SINGLE],
+            key="data_mode", label_visibility="collapsed",
+            captions=["A made-up sunny day with random clouds. Good for "
+                      "exploring how the tool behaves.",
+                      "Our forecasting team's export, uploaded as it is: many "
+                      "days, kW or MW, UTC or IST.",
+                      "One day as two small files (time, mw), for anyone "
+                      "without the engine's export."])
+
+        if data_mode == MODE_SYNTH:
+            st.slider(
+                "Forecast error (% of capacity)", 3, 30, key="err",
+                help="How far actual generation lands from the day-ahead "
+                     "schedule on the synthetic day. This gap drives every "
+                     "DSM penalty: bigger error, bigger penalties.")
+            st.caption("Pick a different random day with **New weather day** on "
+                       "the Results page.")
+
+        elif data_mode == MODE_ENGINE:
+            st.file_uploader(
+                "Forecast-engine export (CSV)", type=["csv"], key="engine_upload",
+                on_change=_on_engine_upload,
+                help="One CSV with a timestamp column plus actual and forecast "
+                     "generation columns at 15-minute resolution, any number of "
+                     "days, e.g. date, power_generation_actual_kw, "
+                     "forecast_generation_kw.")
+            if ss.get("engine_raw") and ss.get("engine_upload") is None:
+                st.caption(f"Using **{ss.get('engine_name')}** (uploaded earlier "
+                           f"this session).")
+            if ss.get("engine_raw"):
+                c1, c2 = st.columns(2)
+                with c1:
+                    st.radio("Values are in", ["kW", "MW"], horizontal=True,
+                             key="engine_unit", on_change=_reset_engine_capacity,
+                             help="Read from the column names when they say "
+                                  "(e.g. '_kw'). Check it if they don't.")
+                with c2:
+                    if _engine_has_offset(ss["engine_raw"]):
+                        st.caption("Timestamps carry a UTC offset -- converted to "
+                                   "India time (IST) automatically.")
+                    else:
+                        st.radio("Timestamps are in", ["UTC", "IST"], horizontal=True,
+                                 key="engine_tz",
+                                 help="How to read timestamps that carry no "
+                                      "timezone. Solar should peak around 12:00 IST.")
+                if engine_error:
+                    st.error(f"Couldn't read that file: {engine_error}")
+                elif eng is not None:
+                    msg = f"{len(eng.days)} complete days loaded"
+                    if eng.skipped:
+                        msg += f"; {len(eng.skipped)} incomplete days skipped"
+                    st.success(msg + ".")
+                    if eng.skipped or eng.filled_blocks:
+                        with st.expander("Data gaps"):
+                            if eng.filled_blocks:
+                                st.caption(
+                                    f"{sum(eng.filled_blocks.values())} isolated missing "
+                                    f"readings on {len(eng.filled_blocks)} days were "
+                                    f"filled from their neighbours.")
+                            for d, why in eng.skipped.items():
+                                st.caption(f"{d}: skipped -- {why}")
+                    unit = ss["engine_unit"]
+                    peak_u = eng.peak_mw * (1000 if unit == "kW" else 1)
+                    st.number_input(
+                        f"This plant's capacity ({unit})", min_value=0.001,
+                        step=0.5 if unit == "kW" else 0.1, format="%.3f",
+                        key="engine_src_cap",
+                        help=f"The real nameplate of the plant this data came "
+                             f"from. The file peaks at {peak_u:.3f} {unit}; the "
+                             f"default rounds that up. It decides how the profile "
+                             f"is scaled, so use the real figure if you know it.")
+                    st.radio(
+                        "Run it as", [SCALE_SCALED, SCALE_OWN], key="engine_scale",
+                        captions=[f"Expressed on the {ss['plant_cap']:g} MW plant from step 1.",
+                                  "Runs the plant at the size entered above."],
+                        help="Scaling keeps each day's real shape and forecast "
+                             "error but expresses it on the contracted plant, so "
+                             "rupee figures and battery sizes are comparable.")
+                    st.caption("Pick which day to look at on the Results page.")
+
+        else:  # MODE_SINGLE
+            st.caption("CSV format: columns `time,mw` -- 96 rows (15-min blocks), "
+                       "values in MW, times in IST.")
+            c1, c2 = st.columns(2)
+            with c1:
+                st.file_uploader("Forecast CSV (day-ahead schedule)", type=["csv"],
+                                 key="fc_upload",
+                                 on_change=_on_single_upload, args=("fc",),
+                                 help="What the plant promised the grid for each "
+                                      "15-minute block.")
+            with c2:
+                st.file_uploader("Actual generation CSV (meter)", type=["csv"],
+                                 key="act_upload",
+                                 on_change=_on_single_upload, args=("act",),
+                                 help="What the plant actually generated in each "
+                                      "15-minute block.")
+            for which, label in (("fc", "Forecast"), ("act", "Actual")):
+                if ss.get(f"single_{which}_error"):
+                    st.error(f"{label}: {ss[f'single_{which}_error']}")
+                elif ss.get(f"single_{which}"):
+                    st.caption(f"{label}: {ss.get(f'single_{which}_name')} "
+                               f"({len(ss[f'single_{which}'])} blocks)")
+            if real_forecast is None:
+                st.caption("Upload both files -- the synthetic day is used until then.")
+
+        for w in data_warnings:
+            st.warning(w)
+
+    # ---- 3. Money -----------------------------------------------------------
+    with st.container(border=True):
+        _step(3, "Price", "What the plant is paid.")
+        st.slider(
+            "PPA tariff (Rs/kWh)", 2.0, 4.5, step=0.05, key="ppa",
+            help="The flat price paid for every scheduled kWh. CERC penalties are "
+                 "multiples of this tariff, so it scales them too.")
+
+    # ---- 4. Battery ---------------------------------------------------------
+    with st.container(border=True):
+        _step(4, "Battery", "The storage scenarios S2-S5 can use.")
+        st.slider(
+            "Battery size (hours of plant capacity)", 0.5, 8.0, step=0.5,
+            key="bess_hours",
+            help="Usable energy = hours x contracted capacity. Power is half the "
+                 "energy per hour (0.5C). 4 h on a 10 MW plant = 40 MWh, 20 MW.")
+        st.caption(f"= {_energy_text(cap)} usable, "
+                   f"{_size_text(C_RATE_PER_MWH * cap)} power, 88% round-trip "
+                   f"efficiency.")
+        with st.expander(f"Advanced: battery wear cost (now Rs {deg:.2f} per kWh cycled)"):
+            st.caption("Every time the battery cycles it uses up part of its life. "
+                       "This turns the purchase price into a cost per kWh cycled: "
+                       "price ÷ warranted cycles.")
+            st.number_input("Battery price (Rs per kWh usable)", min_value=1.0,
+                            step=500.0, format="%.0f", key="deg_price",
+                            help="Default: IRENA 2024, $192/kWh at about Rs 85/$. "
+                                 "Use a live quote for a final figure.")
+            st.radio("I know the warranty in", ["Cycles", "Years"], horizontal=True,
+                     key="deg_calc_mode")
+            if ss["deg_calc_mode"] == "Cycles":
+                st.number_input("Warranted cycles", min_value=1.0, step=100.0,
+                                key="deg_cycles")
+            else:
+                c1, c2 = st.columns(2)
+                with c1:
+                    st.number_input("Warranted years", min_value=0.1, step=0.5,
+                                    key="deg_years")
+                with c2:
+                    st.number_input("Full cycles per day", min_value=0.01, step=0.1,
+                                    key="deg_cpd",
+                                    help="Warranted cycles = years x cycles/day x "
+                                         "330 operating days.")
+            st.caption(f"Total price Rs {capex / 1e7:,.2f} crore for "
+                       f"{usable_kwh:,.0f} kWh -> **Rs {deg:.2f} per kWh cycled**")
+            if deg != computed_deg:
+                st.caption(f":orange[Your inputs give Rs {computed_deg:.2f}/kWh; the "
+                           f"simulator limits this to Rs {DEG_MIN:.2f}-{DEG_MAX:.2f}.]")
+
+    st.write("")
+    if st.button("See the results", type="primary", icon=":material/arrow_forward:",
+                 use_container_width=True, key="see_results"):
+        st.switch_page(PAGE_RESULTS)
+
+
+
+def page_results():
+    st.markdown("### Results")
+    prov = ((real_source_note or "real uploaded generation data") if using_real
+            else "synthetic weather day")
+    st.caption(f"{_size_text(plant_capacity_mw)} plant · flat-rate PPA Rs {ppa:.2f}/kWh · "
+               f"CERC DSM 2024 settlement per 15-minute block · {prov}")
+    top_l, top_r = st.columns([3, 2], vertical_alignment="bottom")
+    with top_l:
+        if engine_days_mw:
+            st.selectbox(
+                "Day (IST)", list(engine_days_mw), key="engine_day",
+                help="Each day has its own weather and forecast error, so every "
+                     "result changes with the day. The next page shows all days "
+                     "at once.")
+        elif not using_real:
+            if st.button("New weather day", icon=":material/refresh:",
+                         help="Draw a different random synthetic day with the same "
+                              "settings."):
+                ss["seed"] = int(np.random.default_rng().integers(1e9))
+                st.rerun()
+    with top_r:
+        comparison_export = pd.DataFrame({
+            "Scenario": list(results),
+            "Profit/day (INR)": [r.total("profit") for r in results.values()],
+            "DSM penalty (INR)": [r.total("dsm_penalty") for r in results.values()],
+            "Degradation (INR)": [r.total("degradation") for r in results.values()],
+        })
+        st.download_button("Export this day (CSV)", comparison_export.to_csv(index=False),
+                           file_name="agentic_grid_results.csv",
+                           icon=":material/download:")
+    for w in data_warnings:
+        st.warning(w)
+    if data_mode != MODE_SYNTH and not using_real:
+        st.info("No real data loaded yet, so this shows the synthetic day. "
+                "Upload your file in step 2 of Set up.")
     st.write("")
 
     def scenario_card(name, r, compare_to=None, badge=None, badge_kind="info",
@@ -929,118 +1042,135 @@ with tab_sim:
     st.info(f"**Best baseline today: {best}** at "
             f"{INR(results[best].total('profit'))}/day{worst_msg}")
 
-    # ---- All uploaded days at a glance (forecast-engine file only) --------
-    # Every number in the scenario cards is for ONE day; picking another day
-    # changes them because that day's weather and forecast error differ.
-    # This panel runs S1-S4 over every complete day at the current settings
-    # (~0.1 s for 68 days), so the whole period is visible without clicking
-    # through days one by one.
-    if engine_days_mw:
-        ov_rows = []
-        for d_, (fc_, ac_) in engine_days_mw.items():
-            o1 = run_s1(fc_, ac_, plant, dsm_cfg, s1_cfg)
-            o2 = run_s2(fc_, ac_, plant, dsm_cfg, s2_cfg,
-                        fresh_battery({"batteryUsableCapacity": float(cap)}))
-            o3 = run_s3(fc_, ac_, plant, dsm_cfg, s3_cfg,
-                        fresh_battery({"batteryUsableCapacity": float(cap)}))
-            o4 = run_s4(fc_, ac_, plant, dsm_cfg, s4_cfg,
-                        fresh_battery({"batteryUsableCapacity": float(cap)}))
-            p1_ = o1.total("profit")
-            gap_ = [abs(a_ - f_) / plant["plant_mw"] * 100 for a_, f_ in zip(ac_, fc_)]
-            lit_ = [g for g, f_ in zip(gap_, fc_) if f_ > 0.01 * plant["plant_mw"]]
-            ov_rows.append({
-                "Day": d_,
-                "Generation (MWh)": sum(ac_) * DT,
-                "Forecast error (%)": float(np.mean(lit_)) if lit_ else 0.0,
-                "Worst block (%)": max(gap_),
-                "S1 profit (Rs)": p1_,
-                "S1 DSM penalty (Rs)": o1.total("dsm_penalty"),
-                "S2 vs S1 (Rs)": o2.total("profit") - p1_,
-                "S3 vs S1 (Rs)": max(o3.total("profit"), p1_) - p1_,
-                "S4 vs S1 (Rs)": o4.total("profit") - p1_,
-                "_ppa": o1.total("ppa_revenue"),
-            })
-        ov = pd.DataFrame(ov_rows)
-        n_ov = len(ov)
-        st.write("")
-        st.markdown(f'<div class="au-section">All {n_ov} uploaded days at a glance</div>',
-                    unsafe_allow_html=True)
-        with st.container(border=True):
-            st.caption(
-                "The cards below show one day. Each day has different weather and a "
-                "different forecast error, so its penalties -- and every scenario's "
-                "result -- differ. This runs S1-S4 on every day at your current "
-                "settings. (S5, the perfect-foresight optimizer, is in the backtest "
-                "further down.)")
-            k1, k2, k3, k4 = st.columns(4)
-            k1.metric("Avg forecast error", f"{ov['Forecast error (%)'].mean():.1f}%",
-                      help="Mean |actual - forecast| in daylight blocks, as % of "
-                           "contracted capacity, averaged over the days.")
-            k2.metric("DSM penalty under S1",
-                      f"{100 * ov['S1 DSM penalty (Rs)'].sum() / max(ov['_ppa'].sum(), 1):.1f}%"
-                      " of revenue", INR(ov['S1 DSM penalty (Rs)'].mean()) + "/day",
-                      delta_color="off")
-            g4 = ov["S4 vs S1 (Rs)"]
-            k3.metric("S4 vs S1", f"{'+' if g4.mean() >= 0 else '-'}{INR(abs(g4.mean()))}/day",
-                      f"ahead {int((g4 > 1).sum())} · level {int((g4.abs() <= 1).sum())} · "
-                      f"behind {int((g4 < -1).sum())} days", delta_color="off")
-            k4.metric("Avg S1 profit", f"{INR(ov['S1 profit (Rs)'].mean())}/day",
-                      f"{INR(ov['S1 profit (Rs)'].min())} - {INR(ov['S1 profit (Rs)'].max())}",
-                      delta_color="off")
+    # At a glance: every scenario's profit for this day in one row, so the
+    # comparison doesn't need five tab clicks.
+    st.markdown('<div class="au-section">This day at a glance</div>',
+                unsafe_allow_html=True)
+    glance = st.columns(len(results))
+    for col_, (nm_, r_) in zip(glance, results.items()):
+        v_ = (r3_raw.total("profit") if nm_.startswith("S3") else r_.total("profit"))
+        d_ = v_ - p1
+        tie_ = abs(d_) < 0.5
+        col_.metric(
+            nm_.split(" - ")[0] + " · " + nm_.split(" - ")[1].replace("Real-time ", ""),
+            INR(v_),
+            None if nm_.startswith("S1") else
+            ("same as S1" if tie_ else f"{'+' if d_ > 0 else '-'}{INR(abs(d_))} vs S1"),
+            delta_color="off" if tie_ else "normal", delta_arrow="off" if tie_ else "auto",
+            help={"S1": "No battery: sell what is generated. The benchmark.",
+                  "S2": "All generation passes through the battery.",
+                  "S3": "Fixed timetable: charge midday, discharge evening. Shown "
+                        "as its own result even on days it's held back.",
+                  "S4": "Reactive: uses the battery only where the CERC penalty "
+                        "costs more than stored energy and wear.",
+                  "S5": "Perfect hindsight: an upper bound, not deployable."}[nm_[:2]])
+    st.write("")
+    st.markdown(f"""
+    <div class="gi-header"><span class="gi-dot"></span>
+    <span class="gi-title">Grid Intelligence</span></div>
+    """, unsafe_allow_html=True)
 
-            fig_ov = make_subplots(specs=[[{"secondary_y": True}]])
-            fig_ov.add_bar(x=ov["Day"], y=ov["S1 DSM penalty (Rs)"],
-                           name="S1 DSM penalty (Rs)", marker_color="#FCA5A5",
-                           customdata=ov[["Forecast error (%)", "Worst block (%)"]],
-                           hovertemplate="%{x}<br>Penalty Rs %{y:,.0f}<br>Forecast error "
-                                         "%{customdata[0]:.1f}% (worst block "
-                                         "%{customdata[1]:.0f}%)<extra></extra>")
-            fig_ov.add_scatter(x=ov["Day"], y=g4, name="S4 gain vs S1 (Rs)",
-                               mode="lines+markers", line=dict(color="#059669", width=2),
-                               hovertemplate="%{x}<br>S4 vs S1: Rs %{y:,.0f}<extra></extra>")
-            fig_ov.add_scatter(x=ov["Day"], y=ov["Forecast error (%)"],
-                               name="Forecast error (%)", mode="lines",
-                               line=dict(color=GREY, width=1.2, dash="dot"),
-                               hovertemplate="%{x}<br>Error %{y:.1f}%<extra></extra>",
-                               secondary_y=True)
-            if selected_engine_day in set(ov["Day"]):
-                fig_ov.add_vline(x=selected_engine_day, line_color=BLUE, line_width=2,
-                                 annotation_text="selected day",
-                                 annotation_font=dict(size=10, color=BLUE))
-            fig_ov.update_layout(height=360, margin=dict(l=10, r=10, t=30, b=10),
-                                 legend=dict(orientation="h", y=1.15),
-                                 hovermode="x unified", template="plotly_white",
-                                 bargap=0.25)
-            # Days as evenly spaced categories: the file has multi-week gaps,
-            # and a date axis would draw lines straight across them.
-            fig_ov.update_xaxes(type="category", nticks=12, tickangle=-45)
-            fig_ov.update_yaxes(title_text="Rs / day", secondary_y=False)
-            fig_ov.update_yaxes(title_text="Forecast error", secondary_y=True,
-                                showgrid=False, ticksuffix="%", tickformat=".0f",
-                                tickmode="linear", tick0=0, dtick=2,
-                                range=[0, max(1.0, float(ov["Forecast error (%)"].max())) * 1.15])
-            st.plotly_chart(fig_ov, use_container_width=True, key="all_days_chart")
+    def analyst(r1, r2, r3_raw, r4, deg, err, r5=None):
+        # Every sentence below is derived from this run's numbers -- including
+        # S4, so the narrative can never contradict the "Best baseline" banner.
+        p1, p2, p3, p4 = (r1.total("profit"), r2.total("profit"),
+                          r3_raw.total("profit"), r4.total("profit"))
+        pen1, pen2 = r1.total("dsm_penalty"), r2.total("dsm_penalty")
+        gross1 = max(r1.total("ppa_revenue"), 1.0)
+        rte_loss_pct = (1 - fresh_battery({"batteryUsableCapacity": float(cap)}).rte) * 100
+        gap_desc = (f"the real Actual-vs-Scheduled gap (averaging {real_gap_mean_pct:.1f}% "
+                    f"of capacity in daylight, {real_gap_max_pct:.0f}% at worst)"
+                    if using_real else f"a {err}% Actual-vs-Scheduled deviation")
+        lines = [
+            f"On this weather day, {gap_desc} cost the "
+            f"plant Rs {pen1:,.0f} in DSM penalty under S1 -- "
+            f"{100 * pen1 / gross1:.1f}% of gross PPA revenue. (This is the loss versus "
+            f"delivering exactly to schedule; the larger 'DSM net' line in the cards "
+            f"is the settlement cash flow, which also includes paying back the tariff "
+            f"on energy that was scheduled but never generated.)"
+        ]
+        cut = pen1 - pen2
+        cut_pct = 100 * cut / pen1 if pen1 > 1 else 0.0
+        if p2 < p1:
+            lines.append(
+                f"S2 routes everything through the battery: it cut the DSM penalty by "
+                f"{cut_pct:.0f}% (Rs {cut:,.0f}) but lost Rs {p1 - p2:,.0f}/day overall, "
+                f"because battery wear (Rs {r2.total('degradation'):,.0f} at a "
+                f"degradation cost of Rs {deg:.2f} per kWh cycled) plus round-trip "
+                f"losses outweigh the penalty it avoids."
+            )
+        else:
+            lines.append(
+                f"Unusually, S2 beats S1 by Rs {p2 - p1:,.0f} today -- cheap degradation "
+                f"(Rs {deg:.2f} per kWh cycled) and a large Actual-vs-Scheduled gap make "
+                f"pure buffering pay."
+            )
+        if battery_deployed:
+            lines.append(
+                f"S3's fixed rule (charge at peak sun, discharge in the evening) earns "
+                f"Rs {p3:,.0f}/day, beating S1 -- so S3 runs its battery today."
+            )
+        else:
+            lines.append(
+                f"S3's fixed rule (charge at peak sun, discharge in the evening) would "
+                f"earn only Rs {p3:,.0f}/day, less than S1, so S3 leaves its battery "
+                f"idle today. Each cycle also loses ~{rte_loss_pct:.0f}% of the energy "
+                f"to round-trip efficiency, which often erases what timed shifting saves."
+            )
+        if p4 > p1:
+            lines.append(
+                f"S4's real-time controller earns Rs {p4:,.0f}/day -- Rs {p4 - p1:,.0f} "
+                f"more than S1. It {s4_trigger_text}, where CERC's penalty costs more "
+                f"than the stored energy and wear it spends -- targeted, reactive use "
+                f"of the battery pays where blanket cycling does not."
+            )
+        else:
+            lines.append(
+                f"Even S4's real-time controller (Rs {p4:,.0f}/day) does not beat "
+                f"S1 today."
+            )
+        if max(p2, p3, p4) < p1:
+            lines.append(
+                "Implication: with a single fixed price, no rule-based strategy beats "
+                "doing nothing today -- the case for the Scenario 5 optimizer and P2P "
+                "merchant revenue."
+            )
+        elif max(p2, p3, p4) == p4 and p4 > p1:
+            lines.append(
+                "Implication: a battery earns its keep under a flat PPA only when it is "
+                "dispatched selectively against the CERC bands, not cycled by a fixed "
+                "rule."
+            )
+        if r5 is not None:
+            best_baseline = max(p1, p2, p3, p4)
+            uplift = r5.total("profit") - best_baseline
+            if uplift > 1:
+                lines.append(
+                    f"The Scenario 5 optimizer earns Rs {r5.total('profit'):,.0f}/day -- "
+                    f"Rs {uplift:,.0f} more than the best baseline strategy today. That "
+                    f"gap, roughly Rs {uplift*330/1e5:,.1f} lakh a year (330 operating "
+                    f"days), is the most perfect foresight could add on top."
+                )
+        return lines
 
-            with st.expander(f"Day-by-day table ({n_ov} days) -- pick a day in the "
-                             f"sidebar to see its full breakdown"):
-                show = ov.drop(columns=["_ppa"])
+    def _typed(text, delay=0.018):
+        for word in text.split(" "):
+            yield word + " "
+            time.sleep(delay)
 
-                def _hl(row):
-                    on = row["Day"] == selected_engine_day
-                    return ["background-color: rgba(61,52,224,.10)" if on else ""] * len(row)
+    # Short and scannable: the first point always shows, the rest are one
+    # click away.
+    gi_lines = analyst(r1, r2, r3_raw, r4, deg, err, r5)
+    with st.container(border=True):
+        st.markdown(gi_lines[0])
+        if len(gi_lines) > 1:
+            st.markdown("\n".join(f"- {x}" for x in gi_lines[1:]))
 
-                st.dataframe(
-                    show.style.apply(_hl, axis=1).format({
-                        "Generation (MWh)": "{:.1f}", "Forecast error (%)": "{:.1f}",
-                        "Worst block (%)": "{:.0f}", "S1 profit (Rs)": "{:,.0f}",
-                        "S1 DSM penalty (Rs)": "{:,.0f}", "S2 vs S1 (Rs)": "{:+,.0f}",
-                        "S3 vs S1 (Rs)": "{:+,.0f}", "S4 vs S1 (Rs)": "{:+,.0f}"}),
-                    hide_index=True, use_container_width=True, height=320)
-                st.download_button("Download this table (CSV)",
-                                   show.to_csv(index=False).encode(),
-                                   file_name="all_days_results.csv",
-                                   key="all_days_csv")
 
+
+    st.write("")
+    with st.expander("What do S1-S5 mean?", icon=":material/help:"):
+        st.markdown(SCENARIO_GUIDE)
     st.write("")
     st.markdown('<div class="au-section">Click a scenario to see its full '
                'breakdown and day profile</div>', unsafe_allow_html=True)
@@ -1147,9 +1277,13 @@ with tab_sim:
             deliv_mw = [row.delivered_mwh * 4 for row in chart_r.rows]
             actual_mw_list = [row.actual_gen_mwh * 4 for row in chart_r.rows]
 
+            # S1 has no battery, so it gets the power panel only -- an empty
+            # battery panel under it just looked broken.
+            _batt_panel = any(row.soc_mwh is not None for row in chart_r.rows)
             fig = make_subplots(
-                rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.08,
-                row_heights=[0.65, 0.35]
+                rows=2 if _batt_panel else 1, cols=1, shared_xaxes=True,
+                vertical_spacing=0.08,
+                row_heights=[0.65, 0.35] if _batt_panel else None
             )
 
             # Real tiered DSM tolerance corridor around the schedule line --
@@ -1311,13 +1445,17 @@ with tab_sim:
                                                     color=color, opacity=0.35),
                                         name=label.capitalize(), row=2, col=1)
 
-            fig.update_layout(height=600, margin=dict(l=10, r=10, t=10, b=10),
+            fig.update_layout(height=600 if _batt_panel else 420,
+                              margin=dict(l=10, r=10, t=10, b=10),
                               legend=dict(orientation="h", y=1.08),
                               hovermode="x unified", template="plotly_white")
-            fig.update_xaxes(range=[0, 24], row=1, col=1)
-            fig.update_xaxes(range=[0, 24], row=2, col=1, title_text="Hour of day")
+            fig.update_xaxes(range=[0, 24], row=1, col=1,
+                             title_text=None if _batt_panel else "Hour of day")
             fig.update_yaxes(title_text="MW", row=1, col=1)
-            fig.update_yaxes(title_text="Battery charge (%)", range=[0, 110], row=2, col=1)
+            if _batt_panel:
+                fig.update_xaxes(range=[0, 24], row=2, col=1, title_text="Hour of day")
+                fig.update_yaxes(title_text="Battery charge (%)", range=[0, 110],
+                                 row=2, col=1)
 
             if zero_deviation_today and name == "S5 - Optimizer":
                 weather_noise_mwh = sum(abs(a - f) for a, f in zip(actual, forecast))
@@ -1406,7 +1544,7 @@ with tab_sim:
     st.markdown('<div class="au-section">Where the money goes -- % of gross revenue</div>',
                unsafe_allow_html=True)
     names = list(results)
-    with st.container(border=True):
+    with st.expander("Show the comparison chart and table", expanded=False):
         st.caption("Each bar is one scenario's own gross PPA revenue, normalized "
                   "to 100% -- showing what SHARE is kept as profit versus lost to "
                   "DSM, degradation, and O&M. For exact rupee amounts, see the "
@@ -1460,21 +1598,133 @@ with tab_sim:
                     use_container_width=True, hide_index=True)
 
     st.write("")
-    st.markdown('<div class="au-section">Researcher tools</div>', unsafe_allow_html=True)
-    with st.container(border=True), st.expander("Block-level settlement (96 rows)"):
-        pick = st.selectbox("Scenario", names)
-        r = results[pick]
-        bl = pd.DataFrame([{
-            "time": row.time, "sched_mwh": row.scheduled_mwh,
-            "actual_mwh": row.actual_gen_mwh, "delivered_mwh": row.delivered_mwh,
-            "dev_%AvC": row.deviation_pct_of_avc,
-            "dsm_recv": row.dsm_receivable, "dsm_pay": row.dsm_payable,
-            "penalty": row.dsm_penalty, "battery_stock": row.inventory_inr,
-            "profit": row.profit,
-        } for row in r.rows])
-        st.dataframe(bl, use_container_width=True, height=300, hide_index=True)
-        st.download_button("Export CSV", bl.to_csv(index=False),
-                           file_name=f"{pick[:2]}_blocks.csv")
+    if st.button("Next: all days and the multi-day backtest", type="primary",
+                 icon=":material/arrow_forward:", use_container_width=True,
+                 key="to_alldays"):
+        st.switch_page(PAGE_ALLDAYS)
+
+def page_alldays():
+    st.markdown("### All days and backtest")
+    st.caption("One day is a snapshot. These views run the scenarios over many days "
+               "at your current settings, so you can see the typical result and the "
+               "spread, not just one number.")
+    if not engine_days_mw:
+        st.info("Upload a forecast-engine file in step 2 of Set up to see every real "
+                "day at once here. The backtest below also works with synthetic days.")
+
+    # ---- All uploaded days at a glance (forecast-engine file only) --------
+    # Every number in the scenario cards is for ONE day; picking another day
+    # changes them because that day's weather and forecast error differ.
+    # This panel runs S1-S4 over every complete day at the current settings
+    # (~0.1 s for 68 days), so the whole period is visible without clicking
+    # through days one by one.
+    if engine_days_mw:
+        ov_rows = []
+        for d_, (fc_, ac_) in engine_days_mw.items():
+            o1 = run_s1(fc_, ac_, plant, dsm_cfg, s1_cfg)
+            o2 = run_s2(fc_, ac_, plant, dsm_cfg, s2_cfg,
+                        fresh_battery({"batteryUsableCapacity": float(cap)}))
+            o3 = run_s3(fc_, ac_, plant, dsm_cfg, s3_cfg,
+                        fresh_battery({"batteryUsableCapacity": float(cap)}))
+            o4 = run_s4(fc_, ac_, plant, dsm_cfg, s4_cfg,
+                        fresh_battery({"batteryUsableCapacity": float(cap)}))
+            p1_ = o1.total("profit")
+            gap_ = [abs(a_ - f_) / plant["plant_mw"] * 100 for a_, f_ in zip(ac_, fc_)]
+            lit_ = [g for g, f_ in zip(gap_, fc_) if f_ > 0.01 * plant["plant_mw"]]
+            ov_rows.append({
+                "Day": d_,
+                "Generation (MWh)": sum(ac_) * DT,
+                "Forecast error (%)": float(np.mean(lit_)) if lit_ else 0.0,
+                "Worst block (%)": max(gap_),
+                "S1 profit (Rs)": p1_,
+                "S1 DSM penalty (Rs)": o1.total("dsm_penalty"),
+                "S2 vs S1 (Rs)": o2.total("profit") - p1_,
+                "S3 vs S1 (Rs)": max(o3.total("profit"), p1_) - p1_,
+                "S4 vs S1 (Rs)": o4.total("profit") - p1_,
+                "_ppa": o1.total("ppa_revenue"),
+            })
+        ov = pd.DataFrame(ov_rows)
+        n_ov = len(ov)
+        st.write("")
+        st.markdown(f'<div class="au-section">All {n_ov} uploaded days at a glance</div>',
+                    unsafe_allow_html=True)
+        with st.container(border=True):
+            st.caption(
+                "The Results page shows one day. Each day has different weather and a "
+                "different forecast error, so its penalties -- and every scenario's "
+                "result -- differ. This runs S1-S4 on every day at your current "
+                "settings. (S5, the perfect-foresight optimizer, is in the backtest "
+                "further down.)")
+            k1, k2, k3, k4 = st.columns(4)
+            k1.metric("Avg forecast error", f"{ov['Forecast error (%)'].mean():.1f}%",
+                      help="Mean |actual - forecast| in daylight blocks, as % of "
+                           "contracted capacity, averaged over the days.")
+            k2.metric("S1 penalty, % of revenue",
+                      f"{100 * ov['S1 DSM penalty (Rs)'].sum() / max(ov['_ppa'].sum(), 1):.1f}%",
+                      INR(ov['S1 DSM penalty (Rs)'].mean()) + "/day",
+                      delta_color="off", delta_arrow="off",
+                      help="CERC deviation penalties under S1 (no battery), as a "
+                           "share of PPA revenue, over all uploaded days.")
+            g4 = ov["S4 vs S1 (Rs)"]
+            k3.metric("S4 vs S1", f"{'+' if g4.mean() >= 0 else '-'}{INR(abs(g4.mean()))}/day",
+                      f"ahead {int((g4 > 1).sum())} · level {int((g4.abs() <= 1).sum())} · "
+                      f"behind {int((g4 < -1).sum())} days", delta_color="off")
+            k4.metric("Avg S1 profit", f"{INR(ov['S1 profit (Rs)'].mean())}/day",
+                      f"{INR(ov['S1 profit (Rs)'].min())} - {INR(ov['S1 profit (Rs)'].max())}",
+                      delta_color="off")
+
+            fig_ov = make_subplots(specs=[[{"secondary_y": True}]])
+            fig_ov.add_bar(x=ov["Day"], y=ov["S1 DSM penalty (Rs)"],
+                           name="S1 DSM penalty (Rs)", marker_color="#FCA5A5",
+                           customdata=ov[["Forecast error (%)", "Worst block (%)"]],
+                           hovertemplate="%{x}<br>Penalty Rs %{y:,.0f}<br>Forecast error "
+                                         "%{customdata[0]:.1f}% (worst block "
+                                         "%{customdata[1]:.0f}%)<extra></extra>")
+            fig_ov.add_scatter(x=ov["Day"], y=g4, name="S4 gain vs S1 (Rs)",
+                               mode="lines+markers", line=dict(color="#059669", width=2),
+                               hovertemplate="%{x}<br>S4 vs S1: Rs %{y:,.0f}<extra></extra>")
+            fig_ov.add_scatter(x=ov["Day"], y=ov["Forecast error (%)"],
+                               name="Forecast error (%)", mode="lines",
+                               line=dict(color=GREY, width=1.2, dash="dot"),
+                               hovertemplate="%{x}<br>Error %{y:.1f}%<extra></extra>",
+                               secondary_y=True)
+            if selected_engine_day in set(ov["Day"]):
+                fig_ov.add_vline(x=selected_engine_day, line_color=BLUE, line_width=2,
+                                 annotation_text="selected day",
+                                 annotation_font=dict(size=10, color=BLUE))
+            fig_ov.update_layout(height=360, margin=dict(l=10, r=10, t=30, b=10),
+                                 legend=dict(orientation="h", y=1.15),
+                                 hovermode="x unified", template="plotly_white",
+                                 bargap=0.25)
+            # Days as evenly spaced categories: the file has multi-week gaps,
+            # and a date axis would draw lines straight across them.
+            fig_ov.update_xaxes(type="category", nticks=12, tickangle=-45)
+            fig_ov.update_yaxes(title_text="Rs / day", secondary_y=False)
+            fig_ov.update_yaxes(title_text="Forecast error", secondary_y=True,
+                                showgrid=False, ticksuffix="%", tickformat=".0f",
+                                tickmode="linear", tick0=0, dtick=2,
+                                range=[0, max(1.0, float(ov["Forecast error (%)"].max())) * 1.15])
+            st.plotly_chart(fig_ov, use_container_width=True, key="all_days_chart")
+
+            with st.expander(f"Day-by-day table ({n_ov} days) -- pick a day on the "
+                             f"Results page to see its full breakdown"):
+                show = ov.drop(columns=["_ppa"])
+
+                def _hl(row):
+                    on = row["Day"] == selected_engine_day
+                    return ["background-color: rgba(61,52,224,.10)" if on else ""] * len(row)
+
+                st.dataframe(
+                    show.style.apply(_hl, axis=1).format({
+                        "Generation (MWh)": "{:.1f}", "Forecast error (%)": "{:.1f}",
+                        "Worst block (%)": "{:.0f}", "S1 profit (Rs)": "{:,.0f}",
+                        "S1 DSM penalty (Rs)": "{:,.0f}", "S2 vs S1 (Rs)": "{:+,.0f}",
+                        "S3 vs S1 (Rs)": "{:+,.0f}", "S4 vs S1 (Rs)": "{:+,.0f}"}),
+                    hide_index=True, use_container_width=True, height=320)
+                st.download_button("Download this table (CSV)",
+                                   show.to_csv(index=False).encode(),
+                                   file_name="all_days_results.csv",
+                                   key="all_days_csv")
 
     st.write("")
     st.markdown('<div class="au-section">Multi-day backtest -- beyond a single day</div>',
@@ -1619,105 +1869,36 @@ with tab_sim:
                 st.caption(f"S3 deployed its battery on {s3_rate:.0f}% of backtested "
                           f"days at current settings -- {s3_note}")
 
+    names = list(results)
     st.write("")
-    st.markdown(f"""
-    <div class="gi-header"><span class="gi-dot"></span>
-    <span class="gi-title">Grid Intelligence</span></div>
-    """, unsafe_allow_html=True)
+    st.markdown('<div class="au-section">Researcher tools</div>', unsafe_allow_html=True)
+    with st.container(border=True), st.expander("Block-level settlement (96 rows)"):
+        pick = st.selectbox("Scenario", names)
+        r = results[pick]
+        bl = pd.DataFrame([{
+            "time": row.time, "sched_mwh": row.scheduled_mwh,
+            "actual_mwh": row.actual_gen_mwh, "delivered_mwh": row.delivered_mwh,
+            "dev_%AvC": row.deviation_pct_of_avc,
+            "dsm_recv": row.dsm_receivable, "dsm_pay": row.dsm_payable,
+            "penalty": row.dsm_penalty, "battery_stock": row.inventory_inr,
+            "profit": row.profit,
+        } for row in r.rows])
+        st.dataframe(bl, use_container_width=True, height=300, hide_index=True)
+        st.download_button("Export CSV", bl.to_csv(index=False),
+                           file_name=f"{pick[:2]}_blocks.csv")
 
-    def analyst(r1, r2, r3_raw, r4, deg, err, r5=None):
-        # Every sentence below is derived from this run's numbers -- including
-        # S4, so the narrative can never contradict the "Best baseline" banner.
-        p1, p2, p3, p4 = (r1.total("profit"), r2.total("profit"),
-                          r3_raw.total("profit"), r4.total("profit"))
-        pen1, pen2 = r1.total("dsm_penalty"), r2.total("dsm_penalty")
-        gross1 = max(r1.total("ppa_revenue"), 1.0)
-        rte_loss_pct = (1 - fresh_battery({"batteryUsableCapacity": float(cap)}).rte) * 100
-        gap_desc = (f"the real Actual-vs-Scheduled gap (averaging {real_gap_mean_pct:.1f}% "
-                    f"of capacity in daylight, {real_gap_max_pct:.0f}% at worst)"
-                    if using_real else f"a {err}% Actual-vs-Scheduled deviation")
-        lines = [
-            f"On this weather day, {gap_desc} cost the "
-            f"plant Rs {pen1:,.0f} in DSM penalty under S1 -- "
-            f"{100 * pen1 / gross1:.1f}% of gross PPA revenue. (This is the loss versus "
-            f"delivering exactly to schedule; the larger 'DSM net' line in the cards "
-            f"is the settlement cash flow, which also includes paying back the tariff "
-            f"on energy that was scheduled but never generated.)"
-        ]
-        cut = pen1 - pen2
-        cut_pct = 100 * cut / pen1 if pen1 > 1 else 0.0
-        if p2 < p1:
-            lines.append(
-                f"S2 routes everything through the battery: it cut the DSM penalty by "
-                f"{cut_pct:.0f}% (Rs {cut:,.0f}) but lost Rs {p1 - p2:,.0f}/day overall, "
-                f"because battery wear (Rs {r2.total('degradation'):,.0f} at a "
-                f"degradation cost of Rs {deg:.2f} per kWh cycled) plus round-trip "
-                f"losses outweigh the penalty it avoids."
-            )
-        else:
-            lines.append(
-                f"Unusually, S2 beats S1 by Rs {p2 - p1:,.0f} today -- cheap degradation "
-                f"(Rs {deg:.2f} per kWh cycled) and a large Actual-vs-Scheduled gap make "
-                f"pure buffering pay."
-            )
-        if battery_deployed:
-            lines.append(
-                f"S3's fixed rule (charge at peak sun, discharge in the evening) earns "
-                f"Rs {p3:,.0f}/day, beating S1 -- so S3 runs its battery today."
-            )
-        else:
-            lines.append(
-                f"S3's fixed rule (charge at peak sun, discharge in the evening) would "
-                f"earn only Rs {p3:,.0f}/day, less than S1, so S3 leaves its battery "
-                f"idle today. Each cycle also loses ~{rte_loss_pct:.0f}% of the energy "
-                f"to round-trip efficiency, which often erases what timed shifting saves."
-            )
-        if p4 > p1:
-            lines.append(
-                f"S4's real-time controller earns Rs {p4:,.0f}/day -- Rs {p4 - p1:,.0f} "
-                f"more than S1. It {s4_trigger_text}, where CERC's penalty costs more "
-                f"than the stored energy and wear it spends -- targeted, reactive use "
-                f"of the battery pays where blanket cycling does not."
-            )
-        else:
-            lines.append(
-                f"Even S4's real-time controller (Rs {p4:,.0f}/day) does not beat "
-                f"S1 today."
-            )
-        if max(p2, p3, p4) < p1:
-            lines.append(
-                "Implication: with a single fixed price, no rule-based strategy beats "
-                "doing nothing today -- the case for the Scenario 5 optimizer and P2P "
-                "merchant revenue."
-            )
-        elif max(p2, p3, p4) == p4 and p4 > p1:
-            lines.append(
-                "Implication: a battery earns its keep under a flat PPA only when it is "
-                "dispatched selectively against the CERC bands, not cycled by a fixed "
-                "rule."
-            )
-        if r5 is not None:
-            best_baseline = max(p1, p2, p3, p4)
-            uplift = r5.total("profit") - best_baseline
-            if uplift > 1:
-                lines.append(
-                    f"The Scenario 5 optimizer earns Rs {r5.total('profit'):,.0f}/day -- "
-                    f"Rs {uplift:,.0f} more than the best baseline strategy today. That "
-                    f"gap, roughly Rs {uplift*330/1e5:,.1f} lakh a year (330 operating "
-                    f"days), is the most perfect foresight could add on top."
-                )
-        return " ".join(lines)
 
-    def _typed(text, delay=0.018):
-        for word in text.split(" "):
-            yield word + " "
-            time.sleep(delay)
-
+def page_how():
+    st.markdown("### How it works")
+    st.caption("What the simulator models, the terms it uses, and where the code lives.")
+    st.markdown('<div class="au-section">Key terms</div>', unsafe_allow_html=True)
     with st.container(border=True):
-        st.write_stream(_typed(analyst(r1, r2, r3_raw, r4, deg, err, r5)))
+        st.markdown(GLOSSARY)
+    st.markdown('<div class="au-section">The five scenarios</div>', unsafe_allow_html=True)
+    with st.container(border=True):
+        st.markdown(SCENARIO_GUIDE)
+    st.write("")
 
-
-with tab_tech:
     st.write("")
     st.markdown('<div class="au-section">System diagram -- interactive 3D</div>',
                unsafe_allow_html=True)
@@ -1750,7 +1931,6 @@ with tab_tech:
         st.link_button("View source on GitHub",
                       "https://github.com/aishwaryamishra444/dispatch-sim")
 
-with tab_docs:
 
     st.markdown('<div class="au-section">Documentation</div>', unsafe_allow_html=True)
     with st.container(border=True):
@@ -1768,7 +1948,36 @@ with tab_docs:
             "- `docs/` -- system design and build-guide documents"
         )
 
-with tab_contact:
+    st.write("")
+    st.markdown('<div class="au-section">Coming next</div>', unsafe_allow_html=True)
+    with st.expander("Coming next: market price upload (IEX) for Scenario 5 / P2P"):
+        st.caption("Baseline Scenarios S1-S4 are PPA-only per the team plan and do "
+                  "not consume market price - this loader is here for Scenario 5 / "
+                  "P2P work, not wired into today's profit numbers.")
+        iex_file = st.file_uploader(
+            "IEX Area Price / Market Snapshot", type=["csv", "xls", "xlsx"],
+            key="iex_upload",
+            help="Download from iexindia.com -> Market Data -> Day Ahead Market "
+                 "-> Market Snapshot / Area Price.")
+        if iex_file is not None:
+            try:
+                iex_result = parse_iex_file(iex_file)
+                st.success(f"Parsed {iex_result.detected_rows} rows from "
+                          f"'{iex_file.name}' (column: {iex_result.source_columns['price']}). "
+                          f"Not yet applied to S1-S4 profit - reserved for Scenario 5.")
+            except IEXFormatError as e:
+                st.warning(f"Couldn't auto-detect columns: {e}")
+                if e.columns:
+                    tcol = st.selectbox("Time column", e.columns, key="iex_tcol")
+                    pcol = st.selectbox("Price column", e.columns, key="iex_pcol")
+                    if st.button("Parse with these columns", key="iex_parse_btn"):
+                        try:
+                            iex_file.seek(0)
+                            iex_r2 = parse_iex_file(iex_file, time_col=tcol, price_col=pcol)
+                            st.success(f"Parsed using '{tcol}' / '{pcol}'.")
+                        except Exception as e2:
+                            st.error(f"Still couldn't parse: {e2}")
+
 
     st.markdown('<div class="au-section">Contact</div>', unsafe_allow_html=True)
     with st.container(border=True):
@@ -1778,6 +1987,56 @@ with tab_contact:
             "reach out via the project repository above, or through Atria "
             "University's Centre of Excellence."
         )
+
+
+SCENARIO_GUIDE = """
+| Scenario | What it does |
+| --- | --- |
+| **S1 · PPA only** | No battery. Sell whatever is generated. The benchmark every other scenario is compared with. |
+| **S2 · Battery buffer** | All generation passes through the battery before reaching the grid. |
+| **S3 · Time windows** | Charge at midday, discharge in the evening on a fixed timetable -- only on days that beats S1. |
+| **S4 · Real-time controller** | Watches each 15-minute block and uses the battery only when the CERC penalty costs more than the stored energy and wear. No foresight, so it could run on a real plant. |
+| **S5 · Optimizer** | Perfect hindsight: picks the schedule and battery moves together. A ceiling on what is possible, not something a real plant could do. |
+"""
+
+GLOSSARY = """
+- **Contracted capacity** -- the plant size in the PPA. CERC judges every deviation as a % of it.
+- **Schedule** -- what the plant promised the grid for each 15-minute block, from the day-ahead forecast.
+- **Deviation** -- actual delivery minus the schedule in a block.
+- **DSM bands** -- CERC's penalty tiers for deviations of 0-5%, 5-10%, 10-20% and over 20% of capacity; the further off, the steeper the rate.
+- **PPA revenue** -- scheduled energy x tariff.
+- **DSM net** -- the deviation settlement cash flow (negative = the plant paid). Inside the first band it just cancels revenue for energy not delivered.
+- **DSM penalty** -- what deviations cost compared with delivering exactly to schedule.
+- **Degradation** -- battery wear, charged per kWh cycled.
+- **Battery stock change** -- S4 starts the day half full; energy it uses up (or adds) is charged (or credited) so it is compared fairly.
+- **Backtest** -- the same comparison repeated over many days.
+"""
+
+st.markdown("""
+<style>
+.au-step{display:flex;align-items:center;gap:10px;margin:2px 0 2px 0;}
+.au-step-n{display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;
+  border-radius:50%;background:#3D34E0;color:#fff;font-weight:700;font-size:0.85rem;}
+.au-step-t{font-weight:700;font-size:1.05rem;}
+</style>""", unsafe_allow_html=True)
+
+# Headless tests can't navigate function pages, so AGS_TEST_PAGE (unset in
+# production) picks which page opens first.
+import os as _os
+_start = _os.environ.get("AGS_TEST_PAGE", "setup")
+PAGE_SETUP = st.Page(page_setup, title="Set up", icon=":material/tune:",
+                     url_path="setup", default=_start == "setup")
+PAGE_RESULTS = st.Page(page_results, title="Results", icon=":material/insights:",
+                       url_path="results", default=_start == "results")
+PAGE_ALLDAYS = st.Page(page_alldays, title="All days & backtest",
+                       icon=":material/calendar_month:", url_path="all-days",
+                       default=_start == "all-days")
+PAGE_HOW = st.Page(page_how, title="How it works", icon=":material/menu_book:",
+                   url_path="how-it-works", default=_start == "how-it-works")
+pg = st.navigation([PAGE_SETUP, PAGE_RESULTS, PAGE_ALLDAYS, PAGE_HOW])
+sidebar_summary()
+pg.run()
+
 
 st.write("")
 st.markdown(
