@@ -291,6 +291,7 @@ def _nice_ceiling(x: float) -> float:
 
 real_forecast, real_actual = None, None
 engine_days_mw = None        # {day: (forecast_mw, actual_mw)} at simulator scale
+selected_engine_day = None
 real_source_note = ""
 if data_mode == "Forecast-engine file (multi-day)":
     st.sidebar.caption("One CSV with a timestamp column plus actual and forecast "
@@ -360,6 +361,7 @@ if data_mode == "Forecast-engine file (multi-day)":
             pick_day = st.sidebar.selectbox("Day", day_list, key="engine_day",
                                             help="IST calendar days with all 96 blocks.")
             real_forecast, real_actual = engine_days_mw[pick_day]
+            selected_engine_day = pick_day
             real_source_note = (f"forecast-engine data, {pick_day} (IST)"
                                 + (f", scaled from {src_cap_mw * 1000:g} kW"
                                    if k_scale != 1.0 and src_cap_mw < 1 else
@@ -523,7 +525,7 @@ if st.sidebar.button("New weather day"):
     st.session_state.seed = int(np.random.default_rng().integers(1e9))
 
 st.sidebar.divider()
-st.sidebar.caption("Engine: dispatch_sim (Reg 6(2)/8(4), 20 unit tests). "
+st.sidebar.caption("Engine: dispatch_sim (Reg 6(2)/8(4), 60+ unit tests). "
                    "Same code path as the xlsx outputs - this UI adds nothing "
                    "to the math.")
 
@@ -926,6 +928,118 @@ with tab_sim:
                  if best == "S1 - PPA only" else "")
     st.info(f"**Best baseline today: {best}** at "
             f"{INR(results[best].total('profit'))}/day{worst_msg}")
+
+    # ---- All uploaded days at a glance (forecast-engine file only) --------
+    # Every number in the scenario cards is for ONE day; picking another day
+    # changes them because that day's weather and forecast error differ.
+    # This panel runs S1-S4 over every complete day at the current settings
+    # (~0.1 s for 68 days), so the whole period is visible without clicking
+    # through days one by one.
+    if engine_days_mw:
+        ov_rows = []
+        for d_, (fc_, ac_) in engine_days_mw.items():
+            o1 = run_s1(fc_, ac_, plant, dsm_cfg, s1_cfg)
+            o2 = run_s2(fc_, ac_, plant, dsm_cfg, s2_cfg,
+                        fresh_battery({"batteryUsableCapacity": float(cap)}))
+            o3 = run_s3(fc_, ac_, plant, dsm_cfg, s3_cfg,
+                        fresh_battery({"batteryUsableCapacity": float(cap)}))
+            o4 = run_s4(fc_, ac_, plant, dsm_cfg, s4_cfg,
+                        fresh_battery({"batteryUsableCapacity": float(cap)}))
+            p1_ = o1.total("profit")
+            gap_ = [abs(a_ - f_) / plant["plant_mw"] * 100 for a_, f_ in zip(ac_, fc_)]
+            lit_ = [g for g, f_ in zip(gap_, fc_) if f_ > 0.01 * plant["plant_mw"]]
+            ov_rows.append({
+                "Day": d_,
+                "Generation (MWh)": sum(ac_) * DT,
+                "Forecast error (%)": float(np.mean(lit_)) if lit_ else 0.0,
+                "Worst block (%)": max(gap_),
+                "S1 profit (Rs)": p1_,
+                "S1 DSM penalty (Rs)": o1.total("dsm_penalty"),
+                "S2 vs S1 (Rs)": o2.total("profit") - p1_,
+                "S3 vs S1 (Rs)": max(o3.total("profit"), p1_) - p1_,
+                "S4 vs S1 (Rs)": o4.total("profit") - p1_,
+                "_ppa": o1.total("ppa_revenue"),
+            })
+        ov = pd.DataFrame(ov_rows)
+        n_ov = len(ov)
+        st.write("")
+        st.markdown(f'<div class="au-section">All {n_ov} uploaded days at a glance</div>',
+                    unsafe_allow_html=True)
+        with st.container(border=True):
+            st.caption(
+                "The cards below show one day. Each day has different weather and a "
+                "different forecast error, so its penalties -- and every scenario's "
+                "result -- differ. This runs S1-S4 on every day at your current "
+                "settings. (S5, the perfect-foresight optimizer, is in the backtest "
+                "further down.)")
+            k1, k2, k3, k4 = st.columns(4)
+            k1.metric("Avg forecast error", f"{ov['Forecast error (%)'].mean():.1f}%",
+                      help="Mean |actual - forecast| in daylight blocks, as % of "
+                           "contracted capacity, averaged over the days.")
+            k2.metric("DSM penalty under S1",
+                      f"{100 * ov['S1 DSM penalty (Rs)'].sum() / max(ov['_ppa'].sum(), 1):.1f}%"
+                      " of revenue", INR(ov['S1 DSM penalty (Rs)'].mean()) + "/day",
+                      delta_color="off")
+            g4 = ov["S4 vs S1 (Rs)"]
+            k3.metric("S4 vs S1", f"{'+' if g4.mean() >= 0 else '-'}{INR(abs(g4.mean()))}/day",
+                      f"ahead {int((g4 > 1).sum())} · level {int((g4.abs() <= 1).sum())} · "
+                      f"behind {int((g4 < -1).sum())} days", delta_color="off")
+            k4.metric("Avg S1 profit", f"{INR(ov['S1 profit (Rs)'].mean())}/day",
+                      f"{INR(ov['S1 profit (Rs)'].min())} - {INR(ov['S1 profit (Rs)'].max())}",
+                      delta_color="off")
+
+            fig_ov = make_subplots(specs=[[{"secondary_y": True}]])
+            fig_ov.add_bar(x=ov["Day"], y=ov["S1 DSM penalty (Rs)"],
+                           name="S1 DSM penalty (Rs)", marker_color="#FCA5A5",
+                           customdata=ov[["Forecast error (%)", "Worst block (%)"]],
+                           hovertemplate="%{x}<br>Penalty Rs %{y:,.0f}<br>Forecast error "
+                                         "%{customdata[0]:.1f}% (worst block "
+                                         "%{customdata[1]:.0f}%)<extra></extra>")
+            fig_ov.add_scatter(x=ov["Day"], y=g4, name="S4 gain vs S1 (Rs)",
+                               mode="lines+markers", line=dict(color="#059669", width=2),
+                               hovertemplate="%{x}<br>S4 vs S1: Rs %{y:,.0f}<extra></extra>")
+            fig_ov.add_scatter(x=ov["Day"], y=ov["Forecast error (%)"],
+                               name="Forecast error (%)", mode="lines",
+                               line=dict(color=GREY, width=1.2, dash="dot"),
+                               hovertemplate="%{x}<br>Error %{y:.1f}%<extra></extra>",
+                               secondary_y=True)
+            if selected_engine_day in set(ov["Day"]):
+                fig_ov.add_vline(x=selected_engine_day, line_color=BLUE, line_width=2,
+                                 annotation_text="selected day",
+                                 annotation_font=dict(size=10, color=BLUE))
+            fig_ov.update_layout(height=360, margin=dict(l=10, r=10, t=30, b=10),
+                                 legend=dict(orientation="h", y=1.15),
+                                 hovermode="x unified", template="plotly_white",
+                                 bargap=0.25)
+            # Days as evenly spaced categories: the file has multi-week gaps,
+            # and a date axis would draw lines straight across them.
+            fig_ov.update_xaxes(type="category", nticks=12, tickangle=-45)
+            fig_ov.update_yaxes(title_text="Rs / day", secondary_y=False)
+            fig_ov.update_yaxes(title_text="Forecast error", secondary_y=True,
+                                showgrid=False, ticksuffix="%", tickformat=".0f",
+                                tickmode="linear", tick0=0, dtick=2,
+                                range=[0, max(1.0, float(ov["Forecast error (%)"].max())) * 1.15])
+            st.plotly_chart(fig_ov, use_container_width=True, key="all_days_chart")
+
+            with st.expander(f"Day-by-day table ({n_ov} days) -- pick a day in the "
+                             f"sidebar to see its full breakdown"):
+                show = ov.drop(columns=["_ppa"])
+
+                def _hl(row):
+                    on = row["Day"] == selected_engine_day
+                    return ["background-color: rgba(61,52,224,.10)" if on else ""] * len(row)
+
+                st.dataframe(
+                    show.style.apply(_hl, axis=1).format({
+                        "Generation (MWh)": "{:.1f}", "Forecast error (%)": "{:.1f}",
+                        "Worst block (%)": "{:.0f}", "S1 profit (Rs)": "{:,.0f}",
+                        "S1 DSM penalty (Rs)": "{:,.0f}", "S2 vs S1 (Rs)": "{:+,.0f}",
+                        "S3 vs S1 (Rs)": "{:+,.0f}", "S4 vs S1 (Rs)": "{:+,.0f}"}),
+                    hide_index=True, use_container_width=True, height=320)
+                st.download_button("Download this table (CSV)",
+                                   show.to_csv(index=False).encode(),
+                                   file_name="all_days_results.csv",
+                                   key="all_days_csv")
 
     st.write("")
     st.markdown('<div class="au-section">Click a scenario to see its full '
