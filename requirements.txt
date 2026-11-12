@@ -1,4 +1,4 @@
-streamlit>=1.40,<2  # tested on 1.67; unpinned upgrades can break the page (use_container_width is being removed)
+streamlit>=1.42,<2  # tested on 1.67; unpinned upgrades can break the page (use_container_width is being removed)
 plotly
 pandas
 numpy
