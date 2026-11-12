@@ -17,6 +17,15 @@ from plotly.subplots import make_subplots
 import streamlit as st
 import streamlit.components.v1 as components
 
+# Streamlit Cloud updates the files on a push but keeps the running Python
+# process, so an already-imported dispatch_sim package would stay at the OLD
+# version while this script is the NEW one -- a new import then fails
+# (seen live: ImportError on charge_trigger_mw). Dropping the package from
+# the module cache makes every run import the files actually on disk.
+import sys as _sys
+for _m in [m for m in _sys.modules if m == "dispatch_sim" or m.startswith("dispatch_sim.")]:
+    del _sys.modules[_m]
+
 from dispatch_sim.core.battery import Battery
 from dispatch_sim.io.loaders import load_dsm_config, load_yaml, load_series_csv_buffer
 from dispatch_sim.io.engine_file import detect_columns, detect_unit, parse_engine_file, read_table
