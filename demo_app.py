@@ -613,7 +613,7 @@ def solar_hero_html():
                     font-weight:600;letter-spacing:.08em;
                     border:1.5px solid rgba(255,255,255,.55);
                     border-radius:999px;padding:10px 26px;opacity:.9;">
-          SET UP IN 4 STEPS &#8595;</div>
+          GET STARTED BELOW &#8595;</div>
       </div>
     </div>"""
 
@@ -714,6 +714,81 @@ def build_3d_diagram():
     )
     return fig
 
+def page_home():
+    components.html(solar_hero_html(), height=420, scrolling=False)
+    st.write("")
+    st.markdown(
+        "<div style='text-align:center;font-size:1.35rem;font-weight:600;"
+        "max-width:820px;margin:0 auto;line-height:1.45;'>"
+        "See what a battery is really worth to a solar plant under India's "
+        "CERC deviation rules, day by day, block by block.</div>",
+        unsafe_allow_html=True)
+    st.markdown(
+        "<div style='text-align:center;color:#5B6B7F;max-width:760px;"
+        "margin:10px auto 0 auto;'>A solar plant promises the grid a schedule for "
+        "every 15 minutes. When the weather makes it miss, CERC charges a penalty. "
+        "This simulator settles every block exactly as the 2024 regulation does and "
+        "compares five ways of running the plant, with and without a battery.</div>",
+        unsafe_allow_html=True)
+    st.write("")
+    b1, b2, b3 = st.columns([1, 1, 1])
+    with b2:
+        if st.button("Start your simulation", type="primary", icon=":material/arrow_forward:",
+                     use_container_width=True, key="home_start"):
+            st.switch_page(PAGE_SETUP)
+        if st.button("See a demo result first", icon=":material/insights:",
+                     use_container_width=True, key="home_demo"):
+            st.switch_page(PAGE_RESULTS)
+
+    st.write("")
+    st.markdown('<div class="au-section">How it works, in three steps</div>',
+                unsafe_allow_html=True)
+    c1, c2, c3 = st.columns(3)
+    for col_, icon_, title_, body_ in (
+        (c1, ":material/tune:", "1 · Set up",
+         "Enter the plant size and tariff, choose a battery, and pick the data: a "
+         "demo day or your own forecasting engine's export."),
+        (c2, ":material/insights:", "2 · Compare",
+         "See five strategies side by side for one day: profit, CERC penalties, "
+         "battery wear, and a 15-minute chart of what the plant and battery did."),
+        (c3, ":material/calendar_month:", "3 · Look across days",
+         "One day is a snapshot. View every uploaded day at once and run a "
+         "multi-day backtest to see the typical result and the spread."),
+    ):
+        with col_, st.container(border=True, height=190):
+            st.markdown(f"#### {icon_} {title_}")
+            st.markdown(body_)
+
+    st.write("")
+    st.markdown('<div class="au-section">The five strategies it compares</div>',
+                unsafe_allow_html=True)
+    s_cols = st.columns(5)
+    for col_, (tag_, name_, line_) in zip(s_cols, (
+        ("S1", "PPA only", "No battery. The benchmark."),
+        ("S2", "Battery buffer", "Everything flows through the battery."),
+        ("S3", "Time windows", "Charge at noon, sell in the evening."),
+        ("S4", "Real-time controller", "Uses the battery only when it pays."),
+        ("S5", "Optimizer", "Perfect hindsight: the ceiling."),
+    )):
+        with col_, st.container(border=True, height=150):
+            st.markdown(f"**{tag_}**  \n{name_}")
+            st.caption(line_)
+
+    st.write("")
+    st.markdown('<div class="au-section">Why you can trust the numbers</div>',
+                unsafe_allow_html=True)
+    t1, t2, t3 = st.columns(3)
+    t1.markdown(":material/gavel: **Real regulation**  \nCERC DSM 2024 bands, "
+                "settled per 15-minute block.")
+    t2.markdown(":material/verified: **Tested engine**  \n60+ automated tests run "
+                "on every change; the same code produces the xlsx reports.")
+    t3.markdown(":material/fact_check: **Checked on real data**  \nValidated on 68 "
+                "days of our forecasting team's output.")
+    st.write("")
+    st.page_link(PAGE_HOW, label="Learn the terms and how the model works",
+                 icon=":material/menu_book:")
+
+
 def _step(n: int, title: str, blurb: str):
     st.markdown(f'<div class="au-step"><span class="au-step-n">{n}</span>'
                 f'<span class="au-step-t">{title}</span></div>', unsafe_allow_html=True)
@@ -721,7 +796,6 @@ def _step(n: int, title: str, blurb: str):
 
 
 def page_setup():
-    components.html(solar_hero_html(), height=360, scrolling=False)
     st.markdown("### Set up your simulation")
     st.markdown(
         "Four quick steps. Every input has a **?** next to it that explains what "
@@ -2023,7 +2097,9 @@ st.markdown("""
 # Headless tests can't navigate function pages, so AGS_TEST_PAGE (unset in
 # production) picks which page opens first.
 import os as _os
-_start = _os.environ.get("AGS_TEST_PAGE", "setup")
+_start = _os.environ.get("AGS_TEST_PAGE", "home")
+PAGE_HOME = st.Page(page_home, title="Home", icon=":material/home:",
+                    url_path="home", default=_start == "home")
 PAGE_SETUP = st.Page(page_setup, title="Set up", icon=":material/tune:",
                      url_path="setup", default=_start == "setup")
 PAGE_RESULTS = st.Page(page_results, title="Results", icon=":material/insights:",
@@ -2033,7 +2109,7 @@ PAGE_ALLDAYS = st.Page(page_alldays, title="All days & backtest",
                        default=_start == "all-days")
 PAGE_HOW = st.Page(page_how, title="How it works", icon=":material/menu_book:",
                    url_path="how-it-works", default=_start == "how-it-works")
-pg = st.navigation([PAGE_SETUP, PAGE_RESULTS, PAGE_ALLDAYS, PAGE_HOW])
+pg = st.navigation([PAGE_HOME, PAGE_SETUP, PAGE_RESULTS, PAGE_ALLDAYS, PAGE_HOW])
 sidebar_summary()
 pg.run()
 
