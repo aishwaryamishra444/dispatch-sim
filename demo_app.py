@@ -714,79 +714,310 @@ def build_3d_diagram():
     )
     return fig
 
+HOME_CSS = """
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap');
+:root {
+  --hx-bg-1: #0f0b30; --hx-bg-2: #211a5c; --hx-bg-3: #2f2577;
+  --hx-ink: #f4f2ff; --hx-mute: #b9b3e6; --hx-dim: #8c85c4;
+  --hx-line: rgba(196, 186, 255, 0.16); --hx-card: rgba(76, 62, 170, 0.28);
+  --hx-violet: #a996ff; --hx-teal: #5fe3c0; --hx-coral: #ff9c8a;
+}
+[data-testid="stAppViewContainer"], [data-testid="stMain"] {
+  background: radial-gradient(1200px 600px at 50% -10%, var(--hx-bg-3) 0%, transparent 60%),
+              linear-gradient(180deg, var(--hx-bg-1) 0%, var(--hx-bg-2) 55%, var(--hx-bg-1) 100%) !important;
+}
+[data-testid="stHeader"] { background: transparent !important; }
+[data-testid="stHeader"] * { color: var(--hx-mute) !important; }
+[data-testid="stSidebar"], [data-testid="stSidebarCollapsedControl"],
+[data-testid="stExpandSidebarButton"] { display: none !important; }
+[data-testid="stMainBlockContainer"], .block-container {
+  max-width: 1240px !important; padding-top: 1.2rem !important;
+}
+[data-testid="stMain"] p, [data-testid="stMain"] span { color: var(--hx-mute); }
+
+/* nav */
+.st-key-hx_nav { border-bottom: 1px solid var(--hx-line); padding-bottom: 10px; }
+.st-key-hx_nav [data-testid="stPageLink-NavLink"] {
+  background: transparent !important; justify-content: center;
+}
+.st-key-hx_nav [data-testid="stPageLink-NavLink"] [data-testid="stIconMaterial"],
+.st-key-hx_nav [data-testid="stPageLink-NavLink"] [data-testid="stIconEmoji"] { display: none !important; }
+.st-key-hx_nav [data-testid="stPageLink-NavLink"] p {
+  font-family: 'JetBrains Mono', monospace !important; font-size: 12.5px !important;
+  letter-spacing: .16em; text-transform: uppercase; color: var(--hx-ink) !important;
+}
+.st-key-hx_nav [data-testid="stPageLink-NavLink"]:hover p { color: var(--hx-teal) !important; }
+.st-key-hx_navcta [data-testid="stPageLink-NavLink"] {
+  border: 1px solid rgba(244, 242, 255, .55); border-radius: 999px; padding: 4px 18px;
+}
+
+/* buttons */
+.st-key-hx_start button, .st-key-hx_start2 button, .st-key-hx_demo button {
+  border-radius: 999px !important; min-height: 48px;
+  font-family: 'JetBrains Mono', monospace !important;
+}
+.st-key-hx_start button p, .st-key-hx_start2 button p, .st-key-hx_demo button p {
+  font-family: 'JetBrains Mono', monospace !important; font-size: 13.5px !important;
+  letter-spacing: .1em; text-transform: uppercase; white-space: nowrap;
+}
+.st-key-hx_start button, .st-key-hx_start2 button {
+  background: linear-gradient(90deg, var(--hx-violet) 0%, var(--hx-teal) 100%) !important;
+  border: 0 !important; box-shadow: 0 8px 30px rgba(95, 227, 192, .18);
+}
+.st-key-hx_start button p, .st-key-hx_start2 button p { color: #120d36 !important; font-weight: 500; }
+.st-key-hx_start button:hover, .st-key-hx_start2 button:hover { filter: brightness(1.08); }
+.st-key-hx_demo button {
+  background: transparent !important; border: 1px solid rgba(244, 242, 255, .5) !important;
+}
+.st-key-hx_demo button p { color: var(--hx-ink) !important; }
+.st-key-hx_demo button:hover { border-color: var(--hx-teal) !important; }
+.st-key-hx_demo button:hover p { color: var(--hx-teal) !important; }
+
+/* page content */
+.hx-brand { display: flex; align-items: center; gap: 10px; padding-top: 4px; }
+.hx-brand b { font-family: 'Inter Tight', sans-serif; font-weight: 600; font-size: 21px;
+  letter-spacing: .14em; color: var(--hx-ink); }
+.hx-hero { text-align: center; padding: 72px 12px 34px; }
+.hx-kicker { font-family: 'JetBrains Mono', monospace; font-size: 12.5px; letter-spacing: .22em;
+  text-transform: uppercase; color: var(--hx-teal); margin-bottom: 22px; }
+.hx-h1 { font-family: 'Inter Tight', sans-serif; font-weight: 500; color: var(--hx-ink);
+  font-size: clamp(38px, 6.2vw, 82px); line-height: 1.04; letter-spacing: -0.025em;
+  max-width: 1050px; margin: 0 auto; }
+.hx-sub { font-family: 'Inter Tight', sans-serif; font-size: clamp(16px, 1.6vw, 20px);
+  line-height: 1.55; color: var(--hx-mute); max-width: 760px; margin: 26px auto 0; }
+.hx-cards { display: grid; grid-template-columns: 1fr 1.55fr 1fr; gap: 26px; margin: 56px 0 10px; }
+.hx-card { background: var(--hx-card); border: 1px solid var(--hx-line); border-radius: 14px;
+  padding: 18px 18px 14px; position: relative; overflow: hidden; }
+.hx-card-t { font-family: 'JetBrains Mono', monospace; font-size: 12px; letter-spacing: .16em;
+  text-transform: uppercase; color: var(--hx-ink); text-align: center; margin-bottom: 8px; }
+.hx-card-c { font-family: 'JetBrains Mono', monospace; font-size: 10.5px; color: var(--hx-dim);
+  letter-spacing: .06em; text-align: center; margin-top: 4px; }
+.hx-photo { border-radius: 14px; min-height: 300px; background-size: cover;
+  background-position: center; border: 1px solid var(--hx-line); position: relative; }
+.hx-photo span { position: absolute; left: 16px; bottom: 14px; font-family: 'JetBrains Mono', monospace;
+  font-size: 11px; letter-spacing: .16em; text-transform: uppercase; color: #fff !important;
+  background: rgba(15, 11, 48, .55); padding: 5px 10px; border-radius: 999px; }
+.hx-sec { margin-top: 96px; }
+.hx-label { font-family: 'JetBrains Mono', monospace; font-size: 12px; letter-spacing: .22em;
+  text-transform: uppercase; color: var(--hx-teal); }
+.hx-h2 { font-family: 'Inter Tight', sans-serif; font-weight: 500; color: var(--hx-ink);
+  font-size: clamp(28px, 3.6vw, 46px); line-height: 1.1; letter-spacing: -0.02em;
+  margin: 12px 0 34px; max-width: 820px; }
+.hx-grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 22px; }
+.hx-grid5 { display: grid; grid-template-columns: repeat(5, 1fr); gap: 16px; }
+.hx-grid4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 22px; }
+.hx-step { border-top: 1px solid var(--hx-line); padding-top: 20px; }
+.hx-step .n { font-family: 'JetBrains Mono', monospace; color: var(--hx-violet); font-size: 13px;
+  letter-spacing: .14em; }
+.hx-step h3 { font-family: 'Inter Tight', sans-serif; font-weight: 500; color: var(--hx-ink);
+  font-size: 24px; margin: 10px 0 10px; padding: 0; }
+.hx-step p, .hx-strat p, .hx-stat p { font-family: 'Inter Tight', sans-serif; color: var(--hx-mute);
+  font-size: 16px; line-height: 1.55; margin: 0; }
+.hx-strat { background: var(--hx-card); border: 1px solid var(--hx-line); border-radius: 12px;
+  padding: 18px 16px; }
+.hx-strat .tag { font-family: 'JetBrains Mono', monospace; font-size: 12px; letter-spacing: .14em;
+  color: var(--hx-teal); }
+.hx-strat h4 { font-family: 'Inter Tight', sans-serif; font-weight: 500; color: var(--hx-ink);
+  font-size: 18px; margin: 8px 0 6px; padding: 0; }
+.hx-strat p { font-size: 14.5px; }
+.hx-stat { border-left: 1px solid var(--hx-line); padding-left: 18px; }
+.hx-stat .v { font-family: 'Inter Tight', sans-serif; font-weight: 500; color: var(--hx-ink);
+  font-size: clamp(34px, 4vw, 52px); letter-spacing: -0.02em; line-height: 1; }
+.hx-stat p { font-size: 15px; margin-top: 10px; }
+.hx-final { text-align: center; margin: 110px 0 24px; }
+@media (max-width: 860px) {
+  .hx-cards, .hx-grid3, .hx-grid4 { grid-template-columns: 1fr; }
+  .hx-grid5 { grid-template-columns: 1fr 1fr; }
+  .hx-hero { padding-top: 36px; }
+  .st-key-hx_nav [data-testid="stColumn"]:has([class*="st-key-hx_l"]),
+  .st-key-hx_nav [data-testid="stColumn"]:has(.st-key-hx_navcta) { display: none !important; }
+}
+</style>
+"""
+
+
+def _svg_img(svg: str, alt: str, style: str = "width:100%;display:block") -> str:
+    """st.html strips inline <svg>, so embed it as an image instead."""
+    b64_ = base64.b64encode(svg.encode("utf-8")).decode("ascii")
+    return f'<img alt="{alt}" style="{style}" src="data:image/svg+xml;base64,{b64_}"/>'
+
+
+def _hx_profile_svg(fc, ac, w=320, h=210):
+    """Forecast vs actual for the day being simulated, as a small SVG chart."""
+    n = len(fc)
+    top = max(max(fc), max(ac), 1e-9) * 1.1
+    px = lambda i: 30 + (w - 40) * i / (n - 1)
+    py = lambda v: 10 + (h - 40) * (1 - v / top)
+    grid = "".join(
+        f'<line x1="{30 + (w - 40) * k / 8:.1f}" y1="10" x2="{30 + (w - 40) * k / 8:.1f}" '
+        f'y2="{h - 30}" stroke="rgba(196,186,255,.13)"/>' for k in range(9))
+    grid += "".join(
+        f'<line x1="30" y1="{10 + (h - 40) * k / 5:.1f}" x2="{w - 10}" '
+        f'y2="{10 + (h - 40) * k / 5:.1f}" stroke="rgba(196,186,255,.13)"/>' for k in range(6))
+    line = lambda vals, col: (
+        '<polyline fill="none" stroke="{}" stroke-width="2" stroke-linejoin="round" '
+        'points="{}"/>'.format(col, " ".join(f"{px(i):.1f},{py(v):.1f}" for i, v in enumerate(vals))))
+    ticks = "".join(
+        f'<text x="{px(i):.1f}" y="{h - 12}" fill="#8c85c4" font-size="10" '
+        f'font-family="JetBrains Mono, monospace" text-anchor="middle">{hh:02d}</text>'
+        for i, hh in ((0, 0), (n // 4, 6), (n // 2, 12), (3 * n // 4, 18), (n - 1, 24)))
+    unit = "MW" if top >= 1 else "kW"
+    return (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w} {h}" '
+            f'>{grid}'
+            f'<text x="12" y="{h / 2:.0f}" fill="#8c85c4" font-size="10" '
+            f'font-family="JetBrains Mono, monospace" transform="rotate(-90 12 {h / 2:.0f})" '
+            f'text-anchor="middle">{unit}</text>'
+            f'{line(fc, "#a996ff")}{line(ac, "#5fe3c0")}{ticks}</svg>')
+
+
+def _hx_gain_svg(gains, w=320, h=210):
+    """Diverging bars: each strategy's profit minus S1's, for this day."""
+    # Scale to the gains, so one large loss (S2 often loses heavily) doesn't
+    # flatten every other bar; a clipped bar gets a break mark and keeps its
+    # exact label.
+    pos = [g for _, g in gains if g > 0]
+    span = max(max(pos) * 1.25 if pos else max(abs(g) for _, g in gains), 1.0)
+    zero_y = 20 + (h - 60) / 2
+    bw = (w - 60) / len(gains)
+    out = [f'<line x1="30" y1="{zero_y:.1f}" x2="{w - 10}" y2="{zero_y:.1f}" '
+           f'stroke="rgba(244,242,255,.45)"/>']
+    for k in range(5):
+        y = 20 + (h - 60) * k / 4
+        out.append(f'<line x1="30" y1="{y:.1f}" x2="{w - 10}" y2="{y:.1f}" '
+                   f'stroke="rgba(196,186,255,.13)"/>')
+    for i, (tag, g) in enumerate(gains):
+        x = 34 + i * bw
+        clipped = abs(g) > span
+        bh = min(abs(g), span) / span * (h - 60) / 2
+        y = zero_y - bh if g >= 0 else zero_y
+        col = "#5fe3c0" if g > 0 else ("#ff9c8a" if g < 0 else "#a996ff")
+        out.append(f'<rect x="{x + bw * .18:.1f}" y="{y:.1f}" width="{bw * .64:.1f}" '
+                   f'height="{max(bh, 1.5):.1f}" rx="3" fill="{col}" opacity=".9"/>')
+        if clipped:
+            by = y + bh - 9 if g < 0 else y + 9
+            out.append(f'<path d="M{x + bw * .12:.1f} {by:.1f} l{bw * .25:.1f} -4 '
+                       f'l{bw * .25:.1f} 8 l{bw * .26:.1f} -4" stroke="#211a5c" '
+                       f'stroke-width="3" fill="none"/>')
+        lab = "0" if abs(g) < 0.5 else f"{g:+,.0f}"
+        ly = (y - 6) if g >= 0 else (y + bh + 13)
+        out.append(f'<text x="{x + bw / 2:.1f}" y="{ly:.1f}" fill="#f4f2ff" font-size="10" '
+                   f'font-family="JetBrains Mono, monospace" text-anchor="middle">{lab}</text>')
+        out.append(f'<text x="{x + bw / 2:.1f}" y="{h - 12}" fill="#8c85c4" font-size="10.5" '
+                   f'font-family="JetBrains Mono, monospace" text-anchor="middle">{tag}</text>')
+    return (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w} {h}" '
+            f'>{"".join(out)}</svg>')
+
+
 def page_home():
-    components.html(solar_hero_html(), height=420, scrolling=False)
-    st.write("")
-    st.markdown(
-        "<div style='text-align:center;font-size:1.35rem;font-weight:600;"
-        "max-width:820px;margin:0 auto;line-height:1.45;'>"
-        "See what a battery is really worth to a solar plant under India's "
-        "CERC deviation rules, day by day, block by block.</div>",
-        unsafe_allow_html=True)
-    st.markdown(
-        "<div style='text-align:center;color:#5B6B7F;max-width:760px;"
-        "margin:10px auto 0 auto;'>A solar plant promises the grid a schedule for "
-        "every 15 minutes. When the weather makes it miss, CERC charges a penalty. "
-        "This simulator settles every block exactly as the 2024 regulation does and "
-        "compares five ways of running the plant, with and without a battery.</div>",
-        unsafe_allow_html=True)
-    st.write("")
-    b1, b2, b3 = st.columns([1, 1, 1])
-    with b2:
-        if st.button("Start your simulation", type="primary", icon=":material/arrow_forward:",
-                     use_container_width=True, key="home_start"):
+    st.html(HOME_CSS)
+
+    # ---- nav bar -----------------------------------------------------------
+    with st.container(key="hx_nav"):
+        n0, n1, n2, n3, n4, n5 = st.columns([2.4, 1, 1, 1.25, 1.35, 1.2],
+                                            vertical_alignment="center")
+        n0.html(f'<div class="hx-brand">{_svg_img(au_mark(28), "Atria University", "width:28px;height:28px")}'
+                f'<b>AGENTIC GRID</b></div>')
+        for i_, (col_, page_, lab_) in enumerate((
+                (n1, PAGE_SETUP, "Set up"), (n2, PAGE_RESULTS, "Results"),
+                (n3, PAGE_ALLDAYS, "All days"), (n4, PAGE_HOW, "How it works"))):
+            with col_, st.container(key=f"hx_l{i_}"):
+                st.page_link(page_, label=lab_)
+        with n5, st.container(key="hx_navcta"):
+            st.page_link(PAGE_SETUP, label="Start")
+
+    # ---- hero -------------------------------------------------------------
+    st.html(
+        '<div class="hx-hero">'
+        '<div class="hx-kicker">Atria University · Centre of Excellence</div>'
+        '<div class="hx-h1">Know What Storage Is Really Worth to a Solar Plant</div>'
+        '<div class="hx-sub">A settlement-accurate simulator for solar and battery plants '
+        "under India's CERC DSM 2024 rules. Five dispatch strategies, every 15-minute "
+        'block, on demo days or your own forecast data.</div></div>')
+    _, b1, b2, _ = st.columns([1.5, 1.35, 1.35, 1.5])
+    with b1:
+        if st.button("Start a simulation", key="hx_start", use_container_width=True):
             st.switch_page(PAGE_SETUP)
-        if st.button("See a demo result first", icon=":material/insights:",
-                     use_container_width=True, key="home_demo"):
+    with b2:
+        if st.button("See a demo result", key="hx_demo", use_container_width=True):
             st.switch_page(PAGE_RESULTS)
 
-    st.write("")
-    st.markdown('<div class="au-section">How it works, in three steps</div>',
-                unsafe_allow_html=True)
-    c1, c2, c3 = st.columns(3)
-    for col_, icon_, title_, body_ in (
-        (c1, ":material/tune:", "1 · Set up",
-         "Enter the plant size and tariff, choose a battery, and pick the data: a "
-         "demo day or your own forecasting engine's export."),
-        (c2, ":material/insights:", "2 · Compare",
-         "See five strategies side by side for one day: profit, CERC penalties, "
-         "battery wear, and a 15-minute chart of what the plant and battery did."),
-        (c3, ":material/calendar_month:", "3 · Look across days",
-         "One day is a snapshot. View every uploaded day at once and run a "
-         "multi-day backtest to see the typical result and the spread."),
-    ):
-        with col_, st.container(border=True, height=190):
-            st.markdown(f"#### {icon_} {title_}")
-            st.markdown(body_)
+    # ---- card row (live numbers from the day being simulated) --------------
+    with open(HERO_IMG_PATH, "rb") as f:
+        img = base64.b64encode(f.read()).decode("ascii")
+    base = r1.total("profit")
+    gains = [(name.split(" ")[0], res.total("profit") - base) for name, res in results.items()]
+    day_txt = (selected_engine_day if data_mode == MODE_ENGINE and engine_days_mw
+               else "uploaded day" if real_forecast is not None else "demo day")
+    st.html(
+        '<div class="hx-cards">'
+        '<div class="hx-card"><div class="hx-card-t">Forecast vs actual</div>'
+        f'{_svg_img(_hx_profile_svg(list(forecast), list(actual)), "Forecast and actual generation through the day")}'
+        '<div class="hx-card-c"><span style="color:#a996ff">━ forecast</span>&nbsp;&nbsp;'
+        f'<span style="color:#5fe3c0">━ actual</span>&nbsp;&nbsp;· {day_txt}</div></div>'
+        f'<div class="hx-photo" style="background-image:url(data:image/jpeg;base64,{img})">'
+        f'<span>{_size_text(plant_capacity_mw)} solar + {_energy_text(cap)} battery</span></div>'
+        '<div class="hx-card"><div class="hx-card-t">Gain over S1</div>'
+        f'{_svg_img(_hx_gain_svg(gains), "Profit gain over S1 for each strategy")}'
+        f'<div class="hx-card-c">Rs per day vs no battery · {day_txt}</div></div>'
+        '</div>')
 
-    st.write("")
-    st.markdown('<div class="au-section">The five strategies it compares</div>',
-                unsafe_allow_html=True)
-    s_cols = st.columns(5)
-    for col_, (tag_, name_, line_) in zip(s_cols, (
-        ("S1", "PPA only", "No battery. The benchmark."),
-        ("S2", "Battery buffer", "Everything flows through the battery."),
-        ("S3", "Time windows", "Charge at noon, sell in the evening."),
-        ("S4", "Real-time controller", "Uses the battery only when it pays."),
-        ("S5", "Optimizer", "Perfect hindsight: the ceiling."),
-    )):
-        with col_, st.container(border=True, height=150):
-            st.markdown(f"**{tag_}**  \n{name_}")
-            st.caption(line_)
+    # ---- how it works ------------------------------------------------------
+    st.html(
+        '<div class="hx-sec"><div class="hx-label">How it works</div>'
+        '<div class="hx-h2">From a forecast file to a rupee answer in three steps.</div>'
+        '<div class="hx-grid3">'
+        '<div class="hx-step"><div class="n">01</div><h3>Set up</h3><p>Plant size, tariff and '
+        "battery. Use a demo day or upload the forecasting engine's export, in kW or MW, "
+        'UTC or IST.</p></div>'
+        '<div class="hx-step"><div class="n">02</div><h3>Compare</h3><p>Five strategies settled '
+        'side by side: profit, CERC penalties, battery wear, and a 15-minute chart of what '
+        'the plant and battery did.</p></div>'
+        '<div class="hx-step"><div class="n">03</div><h3>Backtest</h3><p>Every uploaded day at '
+        'once, so you see the typical result and the spread, not one lucky or unlucky day.'
+        '</p></div></div></div>')
 
+    # ---- strategies ----------------------------------------------------------
+    st.html(
+        '<div class="hx-sec"><div class="hx-label">Five strategies</div>'
+        '<div class="hx-h2">From no battery to perfect hindsight.</div>'
+        '<div class="hx-grid5">'
+        + "".join(
+            f'<div class="hx-strat"><div class="tag">{t}</div><h4>{n}</h4><p>{d}</p></div>'
+            for t, n, d in (
+                ("S1", "PPA only", "No battery. The benchmark every other strategy is "
+                                   "measured against."),
+                ("S2", "Battery buffer", "All generation flows through the battery before "
+                                         "the grid."),
+                ("S3", "Time windows", "Charge at midday, discharge in the evening."),
+                ("S4", "Real-time controller", "Acts block by block, only when the CERC "
+                                               "penalty is worth more than the wear."),
+                ("S5", "Optimizer", "Perfect hindsight. The ceiling no real controller "
+                                    "can beat."),
+            ))
+        + '</div></div>')
+
+    # ---- trust ----------------------------------------------------------------
+    st.html(
+        '<div class="hx-sec"><div class="hx-label">Why trust the numbers</div>'
+        '<div class="hx-h2">The same engine, checked against real data.</div>'
+        '<div class="hx-grid4">'
+        '<div class="hx-stat"><div class="v">15 min</div><p>Settlement resolution, using '
+        'the CERC DSM 2024 deviation bands.</p></div>'
+        '<div class="hx-stat"><div class="v">68</div><p>Real days of our forecasting '
+        "team's output, validated end to end.</p></div>"
+        '<div class="hx-stat"><div class="v">60+</div><p>Automated tests, run on every '
+        'change to the engine.</p></div>'
+        '<div class="hx-stat"><div class="v">1</div><p>Engine behind both this app and '
+        'the xlsx reports. The UI adds nothing to the math.</p></div>'
+        '</div></div>'
+        '<div class="hx-final"><div class="hx-h2" style="margin:0 auto 26px">'
+        'Ready to run your plant?</div></div>')
+    _, c1, _ = st.columns([2.3, 1.4, 2.3])
+    with c1:
+        if st.button("Start a simulation", key="hx_start2", use_container_width=True):
+            st.switch_page(PAGE_SETUP)
     st.write("")
-    st.markdown('<div class="au-section">Why you can trust the numbers</div>',
-                unsafe_allow_html=True)
-    t1, t2, t3 = st.columns(3)
-    t1.markdown(":material/gavel: **Real regulation**  \nCERC DSM 2024 bands, "
-                "settled per 15-minute block.")
-    t2.markdown(":material/verified: **Tested engine**  \n60+ automated tests run "
-                "on every change; the same code produces the xlsx reports.")
-    t3.markdown(":material/fact_check: **Checked on real data**  \nValidated on 68 "
-                "days of our forecasting team's output.")
-    st.write("")
-    st.page_link(PAGE_HOW, label="Learn the terms and how the model works",
-                 icon=":material/menu_book:")
 
 
 def _step(n: int, title: str, blurb: str):
