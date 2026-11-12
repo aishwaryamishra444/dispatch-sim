@@ -6,4 +6,4 @@ pyyaml
 openpyxl
 pytest
 gymnasium
-pulp
+pulp>=2.7,<4  # PuLP 4.x removed LpVariable(lowBound=..., upBound=...); lp_dispatch.py needs the 2.x/3.x API

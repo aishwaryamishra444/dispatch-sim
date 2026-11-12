@@ -222,7 +222,7 @@ st.sidebar.markdown(
     f'<div class="au-mark-sub">Centre of Excellence</div></div></div>',
     unsafe_allow_html=True)
 st.sidebar.title("Agentic Grid Simulator")
-st.sidebar.caption("Baseline Scenarios 1-3 - CERC DSM 2024")
+st.sidebar.caption("Baseline Scenarios S1-S4 - CERC DSM 2024")
 
 plant_capacity_mw = st.sidebar.number_input(
     "Contracted / nameplate capacity (MW)", min_value=0.001, max_value=500.0,
@@ -279,7 +279,7 @@ if data_mode == "Upload real day":
                            "showing the synthetic day below until then.")
 
 with st.sidebar.expander("Real IEX price upload (for future P2P scenarios)"):
-    st.caption("Baseline Scenarios S1-S3 are PPA-only per the team plan and do "
+    st.caption("Baseline Scenarios S1-S4 are PPA-only per the team plan and do "
               "not consume market price - this loader is here for Scenario 5 / "
               "P2P work, not wired into today's profit numbers.")
     iex_file = st.file_uploader(
@@ -292,7 +292,7 @@ with st.sidebar.expander("Real IEX price upload (for future P2P scenarios)"):
             iex_result = parse_iex_file(iex_file)
             st.success(f"Parsed {iex_result.detected_rows} rows from "
                       f"'{iex_file.name}' (column: {iex_result.source_columns['price']}). "
-                      f"Not yet applied to S1-S3 profit - reserved for Scenario 5.")
+                      f"Not yet applied to S1-S4 profit - reserved for Scenario 5.")
         except IEXFormatError as e:
             st.warning(f"Couldn't auto-detect columns: {e}")
             if e.columns:
@@ -312,7 +312,7 @@ if data_mode == "Synthetic (demo)":
                             help="How far actual generation lands from the day-ahead "
                                  "schedule. This single input is what drives every DSM "
                                  "penalty below -- it IS the 'Actual minus Scheduled' gap, "
-                                 "expressed as a percentage. Watch S1/S2/S3 change as you "
+                                 "expressed as a percentage. Watch S1-S4 change as you "
                                  "move it.")
 else:
     # With real uploaded data, deviation is the literal gap between the two
@@ -335,15 +335,19 @@ with st.sidebar.expander("Battery degradation -- research & calculator"):
     )
     calc_mode = st.radio("I know the warranty in:", ["Cycles", "Years"],
                         horizontal=True, key="deg_calc_mode")
-    capex = st.number_input("Battery purchase price (Rs)", min_value=0.0,
-                            value=652_800_000.0, step=1_000_000.0, format="%.0f",
-                            help="Default reflects IRENA's 2024 $192/kWh for a "
-                                 "40 MWh system at ~Rs 85/$ -- re-verify against "
-                                 "a live rate for a final figure.")
-    usable_kwh = st.number_input("Usable capacity (kWh)", min_value=0.0,
-                                 value=float(st.session_state.get("cap_val", 40)) * 1000,
-                                 step=1000.0, format="%.0f",
-                                 help="Defaults to the BESS capacity slider below, in kWh.")
+    # Price is entered per kWh and multiplied by the BESS slider's capacity,
+    # so the total price scales with battery size. (A fixed total price
+    # against a moving capacity made Rs/kWh-cycled -- and S2/S3/S4/S5 wear
+    # cost -- swing 4x just from moving the capacity slider.)
+    price_per_kwh = st.number_input(
+        "Battery price (Rs per kWh usable)", min_value=1.0,
+        value=16_320.0, step=500.0, format="%.0f",
+        help="Default reflects IRENA's 2024 $192/kWh at ~Rs 85/$ -- "
+             "re-verify against a live quote for a final figure.")
+    usable_kwh = float(st.session_state.get("cap_val", 40)) * 1000
+    capex = price_per_kwh * usable_kwh
+    st.caption(f"Usable capacity follows the BESS slider: {usable_kwh:,.0f} kWh "
+               f"-> total price Rs {capex / 1e7:,.2f} crore.")
     if calc_mode == "Cycles":
         warranted_cycles = st.number_input("Warranted cycles", min_value=1.0,
                                            value=6000.0, step=100.0)
@@ -351,14 +355,22 @@ with st.sidebar.expander("Battery degradation -- research & calculator"):
         warranted_years = st.number_input("Warranted years", min_value=0.1,
                                           value=15.0, step=0.5)
         cycles_per_day = st.number_input("Assumed full cycles per day", min_value=0.01,
-                                         value=1.0, step=0.1)
+                                         value=1.0, step=0.1,
+                                         help="Warranted cycles = years x cycles/day x "
+                                              "330 operating days/year (the same 330 "
+                                              "days used for every annualized figure).")
         warranted_cycles = warranted_years * cycles_per_day * 330
 
     cost_per_cycle = capex / warranted_cycles
     computed_deg = cost_per_cycle / usable_kwh
-    deg = min(max(computed_deg, 0.5), 6.0)
+    DEG_MIN, DEG_MAX = 0.5, 6.0
+    deg = min(max(computed_deg, DEG_MIN), DEG_MAX)
 
-    st.markdown(f"**-> Degradation cost: Rs {computed_deg:.2f}/kWh cycled**")
+    st.markdown(f"**-> Degradation cost used: Rs {deg:.2f}/kWh cycled**")
+    if deg != computed_deg:
+        st.caption(f":orange[Your inputs give Rs {computed_deg:.2f}/kWh; the "
+                   f"simulator limits this to Rs {DEG_MIN:.2f}-{DEG_MAX:.2f} "
+                   f"and is using Rs {deg:.2f}.]")
 
 cap = st.sidebar.slider("BESS capacity (MWh)", 10, 80, 40, 5, key="cap_val")
 
@@ -669,13 +681,24 @@ with tab_sim:
             # held-back == S1) -- so the table never looks like a duplicate.
             b = breakdown_r if breakdown_r is not None else r
             dsm_net = b.total("dsm_receivable") - b.total("dsm_payable")
-            df = pd.DataFrame({
-                "Line item": ["PPA revenue", "DSM net", "Degradation", "O&M"],
-                "Amount (Rs)": [b.total("ppa_revenue"), dsm_net,
-                               -b.total("degradation"), -b.total("om")],
-            })
+            items = ["PPA revenue", "DSM net", "Degradation", "O&M"]
+            # "+ 0.0" turns -0.0 into 0.0 so a zero cost never prints as "-0".
+            amounts = [b.total("ppa_revenue"), dsm_net + 0.0,
+                       -b.total("degradation") + 0.0, -b.total("om") + 0.0]
+            inv = b.total("inventory_inr")
+            if abs(inv) >= 0.5:
+                items.append("Battery stock change")
+                amounts.append(inv + 0.0)
+            df = pd.DataFrame({"Line item": items, "Amount (Rs)": amounts})
             st.dataframe(df.style.format({"Amount (Rs)": "{:,.0f}"}),
-                        hide_index=True, use_container_width=True, height=175)
+                        hide_index=True, use_container_width=True,
+                        height=35 * (len(items) + 1) + 3)
+            if abs(inv) >= 0.5:
+                st.caption("S4 starts the day with its battery half full. "
+                           "'Battery stock change' charges for stored energy it "
+                           "used up (at the PPA revenue needed to refill it) or "
+                           "credits energy it ended with -- so it isn't rewarded "
+                           "for spending yesterday's energy.")
 
             total_sched_mwh = sum(row.scheduled_mwh for row in b.rows)
             with st.expander("How is PPA revenue calculated?"):
@@ -690,6 +713,14 @@ with tab_sim:
                     f"(Available Capacity = capacity x 0.25h), and the day's overall "
                     f"shape scales with it."
                 )
+                if name.startswith("S2") and s2_cfg.get("revise_schedule_for_rte", True):
+                    st.caption(
+                        "**Why S2's PPA revenue is lower:** every MWh in S2 passes "
+                        "through the battery and loses its round-trip efficiency "
+                        "(~12%), so S2 schedules forecast x RTE instead of the full "
+                        "forecast (team decision D1). Less scheduled energy means "
+                        "less PPA revenue, even on the same weather day."
+                    )
 
             if live_attempt is not None:
                 # S3-specific: the ONLY big bold number shown is always S3's
@@ -727,6 +758,23 @@ with tab_sim:
         with tab:
             if name == "S1 - PPA only":
                 scenario_card(name, r)
+            elif name == "S3 - Time windows":
+                # Show S3's OWN line items and result, with a badge saying
+                # whether it actually ran today -- otherwise a held-back S3
+                # renders as an exact copy of S1's card.
+                if battery_deployed:
+                    s3_badge, s3_kind = ("Battery deployed today -- the fixed rule "
+                                         "beat leaving it idle."), "good"
+                else:
+                    s3_badge, s3_kind = (
+                        f"Held back today: the fixed rule alone would make "
+                        f"{INR(r3_raw.total('profit'))}/day vs S1's {INR(p1)}, so "
+                        f"S3 leaves the battery idle and its adopted result equals "
+                        f"S1. The table and number below are what the rule itself "
+                        f"would have done."), "warn"
+                scenario_card(name, r, compare_to=p1, badge=s3_badge,
+                              badge_kind=s3_kind, breakdown_r=r3_raw,
+                              live_attempt=r3_raw.total("profit"))
             else:
                 scenario_card(name, r, compare_to=p1)
 
@@ -1054,7 +1102,7 @@ with tab_sim:
                   "DSM, degradation, and O&M. For exact rupee amounts, see the "
                   "table below; this answers a different question: which "
                   "scenario keeps the biggest slice of its own revenue.")
-        profit_pct, dsm_pct, deg_pct, om_pct = [], [], [], []
+        profit_pct, dsm_pct, deg_pct, om_pct, inv_pct = [], [], [], [], []
         for r in results.values():
             gross = max(r.total("ppa_revenue"), 1.0)
             dsm_net = r.total("dsm_receivable") - r.total("dsm_payable")
@@ -1062,25 +1110,39 @@ with tab_sim:
             dsm_pct.append(-dsm_net / gross * 100)
             deg_pct.append(r.total("degradation") / gross * 100)
             om_pct.append(r.total("om") / gross * 100)
+            inv_pct.append(-r.total("inventory_inr") / gross * 100)
 
         fig = go.Figure()
         fig.add_bar(name="Net profit kept", x=names, y=profit_pct, marker_color=GREEN)
         fig.add_bar(name="DSM cost", x=names, y=dsm_pct, marker_color="#DC2626")
         fig.add_bar(name="Degradation cost", x=names, y=deg_pct, marker_color="#F59E0B")
         fig.add_bar(name="O&M cost", x=names, y=om_pct, marker_color=GREY)
-        fig.update_layout(barmode="stack", height=320,
+        if any(abs(v) > 1e-9 for v in inv_pct):
+            fig.add_bar(name="Battery stock used", x=names, y=inv_pct,
+                        marker_color="#7C3AED")
+        # "relative" stacks positives up and negatives down from zero, so a
+        # loss-making scenario reads as costs above the axis and the loss
+        # below it, instead of segments overlapping across zero.
+        fig.update_layout(barmode="relative", height=320,
                           margin=dict(l=10, r=10, t=10, b=10),
                           legend=dict(orientation="h", y=1.12),
                           yaxis_title="% of gross PPA revenue")
+        fig.add_hline(y=0, line_color=INK, line_width=1)
         st.plotly_chart(fig, use_container_width=True, key="pl_composition")
+        if any(p < 0 for p in profit_pct):
+            st.caption("A green segment below zero is a loss: that scenario's costs "
+                       "exceeded its own PPA revenue, so its cost segments add up "
+                       "to more than 100%.")
 
         df = pd.DataFrame({
             "Scenario": names,
             "PPA revenue": [r.total("ppa_revenue") for r in results.values()],
             "DSM net": [r.total("dsm_receivable") - r.total("dsm_payable")
                         for r in results.values()],
-            "Degradation": [r.total("degradation") for r in results.values()],
-            "O&M": [r.total("om") for r in results.values()],
+            # Costs shown negative, matching the scenario cards above.
+            "Degradation": [-r.total("degradation") + 0.0 for r in results.values()],
+            "O&M": [-r.total("om") + 0.0 for r in results.values()],
+            "Battery stock": [r.total("inventory_inr") + 0.0 for r in results.values()],
             "Profit/day": [r.total("profit") for r in results.values()],
             "Profit/year (330d)": [r.total("profit") * 330 for r in results.values()],
         })
@@ -1097,7 +1159,8 @@ with tab_sim:
             "actual_mwh": row.actual_gen_mwh, "delivered_mwh": row.delivered_mwh,
             "dev_%AvC": row.deviation_pct_of_avc,
             "dsm_recv": row.dsm_receivable, "dsm_pay": row.dsm_payable,
-            "penalty": row.dsm_penalty, "profit": row.profit,
+            "penalty": row.dsm_penalty, "battery_stock": row.inventory_inr,
+            "profit": row.profit,
         } for row in r.rows])
         st.dataframe(bl, use_container_width=True, height=300, hide_index=True)
         st.download_button("Export CSV", bl.to_csv(index=False),
@@ -1132,17 +1195,20 @@ with tab_sim:
                                   fresh_battery({"batteryUsableCapacity": float(cap)}))
                 bt_deployed = bt_r3_raw.total("profit") > bt_r1.total("profit")
                 bt_r3 = bt_r3_raw if bt_deployed else bt_r1
+                bt_r4 = run_s4(bt_fc, bt_act, plant, dsm_cfg, s4_cfg,
+                               fresh_battery({"batteryUsableCapacity": float(cap)}))
                 row = {"day": i + 1, "seed": int(seed),
                       "S1": bt_r1.total("profit"), "S2": bt_r2.total("profit"),
-                      "S3": bt_r3.total("profit"),
+                      "S3": bt_r3.total("profit"), "S4": bt_r4.total("profit"),
                       "S3_battery_used": bt_deployed}
                 try:
                     bt_r5 = solve_optimal_dispatch(
                         bt_fc, bt_act, plant, dsm_cfg,
                         OptimizerBatterySpec(float(cap), 20.0, 0.88, 10, 90), deg)
                     row["S5"] = bt_r5.total("profit")
-                except Exception:
-                    row["S5"] = None
+                except Exception as e:  # noqa: BLE001
+                    row["S5"] = float("nan")
+                    st.session_state["backtest_s5_error"] = str(e)
                 rows.append(row)
                 progress.progress((i + 1) / n_days, text=f"Day {i+1}/{n_days}")
             progress.empty()
@@ -1152,7 +1218,23 @@ with tab_sim:
 
         if "backtest_df" in st.session_state:
             bt_df = st.session_state["backtest_df"]
-            scen_cols = [c for c in ["S1", "S2", "S3", "S5"] if c in bt_df.columns]
+            scen_cols = [c for c in ["S1", "S2", "S3", "S4", "S5"]
+                        if c in bt_df.columns and bt_df[c].notna().any()]
+            if "S5" in bt_df.columns and "S5" not in scen_cols:
+                st.warning("S5 optimizer did not solve during this backtest, so it is "
+                           "left out of the table: "
+                           f"{st.session_state.get('backtest_s5_error', 'unknown error')}")
+
+            # Win rate: a day's winners are every scenario within Rs 1 of that
+            # day's best profit. When S3 is held back it is a copy of S1, so it
+            # can't "win" a day it didn't actually play -- otherwise S1 and S3
+            # tie on every such day and idxmax() hands every tie to S1.
+            best_per_day = bt_df[scen_cols].max(axis=1)
+            def _wins(c):
+                won = bt_df[c] >= best_per_day - 1.0
+                if c == "S3":
+                    won &= bt_df["S3_battery_used"]
+                return won.mean() * 100
 
             summary = pd.DataFrame({
                 "Scenario": scen_cols,
@@ -1160,20 +1242,25 @@ with tab_sim:
                 "Min": [bt_df[c].min() for c in scen_cols],
                 "Max": [bt_df[c].max() for c in scen_cols],
                 "Std dev": [bt_df[c].std() for c in scen_cols],
-                "Win rate (best day)": [
-                    f"{(bt_df[scen_cols].idxmax(axis=1) == c).mean()*100:.0f}%"
-                    for c in scen_cols],
+                "Win rate (best day)": [f"{_wins(c):.0f}%" for c in scen_cols],
             })
             st.dataframe(
                 summary.style.format({c: "Rs {:,.0f}" for c in
                                      ["Mean profit/day", "Min", "Max", "Std dev"]}),
                 hide_index=True, use_container_width=True)
+            st.caption("Win rate counts the days a scenario matched the best profit "
+                      "(ties are credited to each tied scenario, so rates can sum "
+                      "past 100%). S3 only counts days it actually ran its battery.")
 
             fig_bt = go.Figure()
-            colors_bt = {"S1": GREY, "S2": "#DC2626", "S3": "#F59E0B", "S5": BLUE}
+            colors_bt = {"S1": GREY, "S2": "#DC2626", "S3": "#F59E0B",
+                         "S4": "#059669", "S5": BLUE}
             for c in scen_cols:
+                # S3 held back == S1, so its line would hide S1's; dash it.
+                dash = "dash" if c == "S3" else None
                 fig_bt.add_scatter(x=bt_df["day"], y=bt_df[c], name=c, mode="lines+markers",
-                                  line=dict(color=colors_bt.get(c, INK), width=1.6))
+                                  line=dict(color=colors_bt.get(c, INK), width=1.6,
+                                            dash=dash))
             fig_bt.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10),
                                 legend=dict(orientation="h", y=1.12),
                                 xaxis_title="Backtest day", yaxis_title="Profit (Rs)")
@@ -1181,9 +1268,17 @@ with tab_sim:
 
             if "S3" in bt_df.columns:
                 s3_rate = bt_df["S3_battery_used"].mean() * 100
-                st.caption(f"S3 deployed its battery on {s3_rate:.0f}% of backtested days "
-                          f"at current settings -- confirming the adaptive logic responds "
-                          f"to real day-to-day variation, not just one fixed day.")
+                if s3_rate == 0:
+                    s3_note = ("its fixed rule never beat leaving the battery idle, so "
+                               "S3 reports the same numbers as S1 on every day.")
+                elif s3_rate == 100:
+                    s3_note = ("its fixed rule beat leaving the battery idle on every "
+                               "day at these settings.")
+                else:
+                    s3_note = ("so the deploy-or-hold decision does respond to "
+                               "day-to-day weather, not just one fixed day.")
+                st.caption(f"S3 deployed its battery on {s3_rate:.0f}% of backtested "
+                          f"days at current settings -- {s3_note}")
 
     st.write("")
     st.markdown(f"""
@@ -1191,66 +1286,84 @@ with tab_sim:
     <span class="gi-title">Grid Intelligence</span></div>
     """, unsafe_allow_html=True)
 
-    def analyst(r1, r2, r3_raw, deg, err, r5=None):
-        p1, p2, p3 = r1.total("profit"), r2.total("profit"), r3_raw.total("profit")
-        pen1 = r1.total("dsm_penalty")
+    def analyst(r1, r2, r3_raw, r4, deg, err, r5=None):
+        # Every sentence below is derived from this run's numbers -- including
+        # S4, so the narrative can never contradict the "Best baseline" banner.
+        p1, p2, p3, p4 = (r1.total("profit"), r2.total("profit"),
+                          r3_raw.total("profit"), r4.total("profit"))
+        pen1, pen2 = r1.total("dsm_penalty"), r2.total("dsm_penalty")
         gross1 = max(r1.total("ppa_revenue"), 1.0)
+        rte_loss_pct = (1 - fresh_battery({"batteryUsableCapacity": float(cap)}).rte) * 100
         lines = [
             f"On this weather day, a {err}% Actual-vs-Scheduled deviation cost the "
-            f"plant Rs {pen1:,.0f} in true DSM penalty under S1 -- "
-            f"{100 * pen1 / gross1:.1f}% of gross PPA revenue."
+            f"plant Rs {pen1:,.0f} in DSM penalty under S1 -- "
+            f"{100 * pen1 / gross1:.1f}% of gross PPA revenue. (This is the loss versus "
+            f"delivering exactly to schedule; the larger 'DSM net' line in the cards "
+            f"is the settlement cash flow, which also includes paying back the tariff "
+            f"on energy that was scheduled but never generated.)"
         ]
+        cut = pen1 - pen2
+        cut_pct = 100 * cut / pen1 if pen1 > 1 else 0.0
         if p2 < p1:
             lines.append(
-                f"S2 buffered most deviation but destroyed Rs {p1 - p2:,.0f}/day of value: "
-                f"degradation (Rs {r2.total('degradation'):,.0f}) plus round-trip losses "
-                f"exceeded the penalty avoided -- at Rs {deg:.2f}/kWh, cycling everything "
-                f"is a cure costlier than the disease."
+                f"S2 routes everything through the battery: it cut the DSM penalty by "
+                f"{cut_pct:.0f}% (Rs {cut:,.0f}) but lost Rs {p1 - p2:,.0f}/day overall, "
+                f"because battery wear (Rs {r2.total('degradation'):,.0f} at a "
+                f"degradation cost of Rs {deg:.2f} per kWh cycled) plus round-trip "
+                f"losses outweigh the penalty it avoids."
             )
         else:
             lines.append(
                 f"Unusually, S2 beats S1 by Rs {p2 - p1:,.0f} today -- cheap degradation "
-                f"(Rs {deg:.2f}/kWh) and a large Actual-vs-Scheduled gap make pure "
-                f"buffering pay."
+                f"(Rs {deg:.2f} per kWh cycled) and a large Actual-vs-Scheduled gap make "
+                f"pure buffering pay."
             )
         if battery_deployed:
             lines.append(
                 f"S3's fixed rule (charge at peak sun, discharge in the evening) earns "
-                f"Rs {p3:,.0f}/day on its own economics: at this degradation cost, timed "
-                f"shifting plus deviation buffering covers its own wear cost -- so the "
-                f"battery is deployed today."
+                f"Rs {p3:,.0f}/day, beating S1 -- so S3 runs its battery today."
             )
         else:
             lines.append(
-                f"S3's fixed rule (charge at peak sun, discharge in the evening) earns "
-                f"only Rs {p3:,.0f}/day on its own economics -- not enough to justify "
-                f"running the battery today. Even at low degradation cost, the battery's "
-                f"own round-trip efficiency loss (~12% per cycle) is often enough on its "
-                f"own to erase what little DSM saving timed shifting buys."
+                f"S3's fixed rule (charge at peak sun, discharge in the evening) would "
+                f"earn only Rs {p3:,.0f}/day, less than S1, so S3 leaves its battery "
+                f"idle today. Each cycle also loses ~{rte_loss_pct:.0f}% of the energy "
+                f"to round-trip efficiency, which often erases what timed shifting saves."
             )
-        if max(p2, p3) < p1:
+        if p4 > p1:
             lines.append(
-                "Implication: with a single fixed price, no rule-based strategy reliably "
-                "beats doing nothing -- driven jointly by degradation cost and the "
-                "battery's unavoidable round-trip efficiency loss, not degradation alone. "
-                "That gap is the quantified case for the Scenario 5 optimizer and P2P "
+                f"S4's real-time controller earns Rs {p4:,.0f}/day -- Rs {p4 - p1:,.0f} "
+                f"more than S1. It only touches the battery when a block's gap would "
+                f"cross CERC's first band, so it avoids most of the penalty for a "
+                f"fraction of S2's wear: targeted, reactive use of the battery pays "
+                f"where blanket cycling does not."
+            )
+        else:
+            lines.append(
+                f"Even S4's real-time controller (Rs {p4:,.0f}/day) does not beat "
+                f"S1 today."
+            )
+        if max(p2, p3, p4) < p1:
+            lines.append(
+                "Implication: with a single fixed price, no rule-based strategy beats "
+                "doing nothing today -- the case for the Scenario 5 optimizer and P2P "
                 "merchant revenue."
             )
-        else:
+        elif max(p2, p3, p4) == p4 and p4 > p1:
             lines.append(
-                "Implication: the battery verdict is close today -- confirming the real "
-                "degradation price with the battery team is the single highest-value "
-                "open item."
+                "Implication: a battery earns its keep under a flat PPA only when it is "
+                "dispatched selectively against the CERC bands, not cycled by a fixed "
+                "rule."
             )
         if r5 is not None:
-            best_baseline = max(p1, p2, p3)
+            best_baseline = max(p1, p2, p3, p4)
             uplift = r5.total("profit") - best_baseline
             if uplift > 1:
                 lines.append(
                     f"The Scenario 5 optimizer earns Rs {r5.total('profit'):,.0f}/day -- "
                     f"Rs {uplift:,.0f} more than the best baseline strategy today. That "
-                    f"gap, roughly Rs {uplift*330/1e5:,.1f} lakh a year, is value left on "
-                    f"the table by any fixed rule, however well-chosen."
+                    f"gap, roughly Rs {uplift*330/1e5:,.1f} lakh a year (330 operating "
+                    f"days), is the most perfect foresight could add on top."
                 )
         return " ".join(lines)
 
@@ -1260,7 +1373,7 @@ with tab_sim:
             time.sleep(delay)
 
     with st.container(border=True):
-        st.write_stream(_typed(analyst(r1, r2, r3_raw, deg, err, r5)))
+        st.write_stream(_typed(analyst(r1, r2, r3_raw, r4, deg, err, r5)))
 
 
 with tab_tech:
@@ -1307,7 +1420,7 @@ with tab_docs:
             "- `dispatch_sim/core/` -- settlement engine, battery model, ledger\n"
             "- `dispatch_sim/config/` -- CERC bands, plant terms, scenario "
             "definitions (every unconfirmed value flagged in the file)\n"
-            "- `dispatch_sim/runners/` -- Scenario 1-3 dispatch logic\n"
+            "- `dispatch_sim/runners/` -- Scenario 1-4 dispatch logic\n"
             "- `dispatch_sim/rl/` -- Scenario 5 reinforcement-learning "
             "environment\n"
             "- `dispatch_sim/tests/` -- the automated verification suite\n"
@@ -1330,5 +1443,5 @@ st.markdown(
     f'<div style="display:flex;align-items:center;gap:8px;color:{GREY};'
     f'font-size:0.82rem;">{au_mark(18)}<span>Atria University Centre of '
     f'Excellence -- dispatch_sim -- github.com/aishwaryamishra444/dispatch-sim'
-    f' -- values marked NEEDS-CONFIRMATION in config pending team sign-off</span></div>',
+    f' -- some regulatory and cost inputs are provisional pending team review</span></div>',
     unsafe_allow_html=True)
