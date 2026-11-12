@@ -1008,8 +1008,8 @@ def page_home():
         "team's output, validated end to end.</p></div>"
         '<div class="hx-stat"><div class="v">60+</div><p>Automated tests, run on every '
         'change to the engine.</p></div>'
-        '<div class="hx-stat"><div class="v">1</div><p>Engine behind both this app and '
-        'the xlsx reports. The UI adds nothing to the math.</p></div>'
+        '<div class="hx-stat"><div class="v">Rs 0</div><p>Difference between this app and '
+        'the engine across all 68 real days.</p></div>'
         '</div></div>'
         '<div class="hx-final"><div class="hx-h2" style="margin:0 auto 26px">'
         'Ready to run your plant?</div></div>')
