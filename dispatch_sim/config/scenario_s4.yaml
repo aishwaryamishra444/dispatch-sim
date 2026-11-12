@@ -3,3 +3,4 @@ battery:
   enabled: true
   mode: reactive                        # reacts block-by-block, no foresight
 degradation_inr_per_kwh: 2.5            # D3: per kWh throughput, x0.5. NEEDS-CONFIRMATION
+discharge_trigger: economic             # economic | band1 -- see run_s4 docstring

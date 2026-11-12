@@ -1,6 +1,11 @@
 """Battery model — SoC bookkeeping with C-rate, SoC limits, and one-way
 efficiency sqrt(RTE). Tracks total throughput (MWh moved in either direction)
-for degradation costing (design decision D3: cost per kWh throughput, x0.5)."""
+for degradation costing (design decision D3: cost per kWh throughput, x0.5).
+
+Throughput is measured at the CELLS in both directions -- energy actually
+stored on charge, energy actually drawn on discharge -- since that is what
+wears the battery. (Previously charge was counted at the grid side and
+discharge at the cell side; the optimizer counted both at the grid side.)"""
 
 from __future__ import annotations
 
@@ -41,7 +46,7 @@ class Battery:
     def charge(self, mw: float) -> float:
         mw = max(0.0, min(mw, self.max_charge_mw()))
         self.soc_mwh += mw * self.eta * DT
-        self.throughput_mwh += mw * DT
+        self.throughput_mwh += mw * self.eta * DT  # energy into the cells
         return mw
 
     def discharge(self, mw_delivered: float) -> float:

@@ -181,3 +181,41 @@ class TestS4ReactiveController:
         r4 = run_s4([5.0] * BLOCKS, [5.0] * BLOCKS, plant, dsm,
                    {"name": "S4", "degradation_inr_per_kwh": 2.5}, battery)
         assert r4.total("inventory_inr") == 0.0
+
+
+class TestS4EconomicTrigger:
+    """discharge_trigger="economic": S4 only spends stored energy where the
+    CERC payable rate beats the real cost of a delivered kWh from storage.
+    Hand-derived with this file's battery (RTE 0.81, eta 0.9), tariff 2.60:
+      cost_x = 1/0.81 + (deg*0.5/0.9)/2.60
+      deg=2.5 -> 1.2346 + 0.5342 = 1.769x  -> first payable rate above it is
+                 Band 4 (2.00x), whose lower edge is 20% of AvC = 2.0 MW.
+      deg=0.1 -> 1.2346 + 0.0214 = 1.256x  -> Band 3 (1.50x), edge 10% = 1.0 MW."""
+
+    def _scen(self, deg):
+        return {"name": "S4", "degradation_inr_per_kwh": deg,
+                "discharge_trigger": "economic"}
+
+    def test_trigger_moves_to_the_band_that_pays(self):
+        from dispatch_sim.runners.rules import discharge_trigger_mw
+        plant, dsm = make_plant(), make_dsm()
+        assert discharge_trigger_mw(plant, dsm, self._scen(2.5), make_battery()) == 2.0
+        assert discharge_trigger_mw(plant, dsm, self._scen(0.1), make_battery()) == 1.0
+        # the original rule is untouched when asked for
+        band1 = {"name": "S4", "discharge_trigger": "band1"}
+        assert discharge_trigger_mw(plant, dsm, band1, make_battery()) == 0.5
+
+    def test_no_band_pays_means_never_discharge(self):
+        from dispatch_sim.runners.rules import discharge_trigger_mw
+        assert discharge_trigger_mw(make_plant(), make_dsm(), self._scen(50.0),
+                                    make_battery()) == float("inf")
+
+    def test_covers_only_the_part_beyond_the_paying_edge(self):
+        plant, dsm = make_plant(), make_dsm()
+        forecast = [5.0] * BLOCKS
+        actual = [5.0] * BLOCKS
+        actual[10] = 3.5   # 1.5 MW short: inside Bands 2-3, not worth covering
+        actual[20] = 2.5   # 2.5 MW short: 0.5 MW beyond the 2.0 MW Band 4 edge
+        r4 = run_s4(forecast, actual, plant, dsm, self._scen(2.5), make_battery())
+        assert abs(r4.rows[10].delivered_mwh - 3.5 * 0.25) < 1e-6
+        assert abs(r4.rows[20].delivered_mwh - (2.5 + 0.5) * 0.25) < 1e-6

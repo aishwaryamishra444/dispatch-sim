@@ -24,6 +24,25 @@ def run_s1(forecast, actual, plant, dsm_cfg: DsmConfig, scen: dict,
                         zeros, plant, dsm_cfg, 0.0, scen)
 
 
+def discharge_trigger_mw(plant, dsm_cfg: DsmConfig, scen: dict,
+                         battery: Battery) -> float:
+    """Shortfall (MW) beyond which S4 discharges. See run_s4's docstring."""
+    avc_mw = plant["plant_mw"]
+    edges_pct = list(dsm_cfg.bands.edges_pct)
+    if scen.get("discharge_trigger", "band1") != "economic":
+        return avc_mw * edges_pct[0] / 100.0
+    rate = plant["ppa_rate_inr_per_kwh"]
+    deg = scen.get("degradation_inr_per_kwh", 2.5)
+    # cost of one delivered kWh from storage, as a multiple of the tariff:
+    # refill (1/RTE kWh at the PPA rate) + wear on the 1/eta kWh drawn (x0.5, D3)
+    cost_x = 1.0 / battery.rte + (deg * 0.5 / battery.eta) / rate
+    lower_edges = [0.0] + edges_pct  # band k spans lower_edges[k] .. next edge
+    for k, under_rate in enumerate(dsm_cfg.bands.under_rates):
+        if under_rate > cost_x:
+            return avc_mw * lower_edges[k] / 100.0
+    return float("inf")
+
+
 def run_s4(forecast, actual, plant, dsm_cfg: DsmConfig, scen: dict,
            battery: Battery) -> ScenarioResult:
     """S4 - Real-time reactive controller. Unlike S5 (perfect foresight,
@@ -48,36 +67,54 @@ def run_s4(forecast, actual, plant, dsm_cfg: DsmConfig, scen: dict,
     doing nothing at all); starting at 50% let it eliminate the day's
     entire DSM penalty instead. A real operator would keep a working
     reserve for exactly this reason, rather than starting every day at
-    zero."""
+    zero.
+
+    Discharge trigger (scen["discharge_trigger"]):
+      "band1"    -- the original rule: cover any shortfall beyond the Band 1
+                    edge, back to that edge.
+      "economic" -- cover a shortfall only beyond the band edge where
+                    CERC's payable rate first exceeds what a delivered kWh
+                    from storage really costs (refilling it at the PPA rate
+                    after round-trip loss, plus cell wear). Still purely
+                    reactive and still set by the real CERC bands -- it just
+                    stops spending stored energy where the penalty it avoids
+                    is cheaper than the energy itself. Recomputed from the
+                    live tariff, degradation cost and RTE, so it moves with
+                    the sliders. If no band's rate exceeds that cost, S4
+                    never discharges.
+    Excess beyond the Band 1 edge is absorbed in both modes. (Absorbing
+    smaller excess to refill the reserve was tested and loses money: Band 1
+    over-injection is already paid at the full contract rate.)"""
     battery.soc_mwh = battery.usable_capacity_mwh * 0.5
     opening_soc_mwh = battery.soc_mwh
 
     sched = list(forecast)  # fixed at forecast -- no foresight, unlike S5
     avc_mw = plant["plant_mw"]  # AvC(MWh) = plant_mw * DT; in MW terms this IS plant_mw
-    band1_edge_pct = dsm_cfg.bands.edges_pct[0] / 100.0  # real config value, e.g. 0.05
+    edges_pct = list(dsm_cfg.bands.edges_pct)
+    band1_edge_pct = edges_pct[0] / 100.0  # real config value, e.g. 0.05
     threshold_mw = avc_mw * band1_edge_pct
+    discharge_threshold_mw = discharge_trigger_mw(plant, dsm_cfg, scen, battery)
 
     delivered, soc_series, thr = [], [], []
     for t in range(BLOCKS):
         thr0 = battery.throughput_mwh
         gap_mw = sched[t] - actual[t]  # positive = shortfall, negative = excess
 
-        if abs(gap_mw) <= threshold_mw:
-            # Already inside Band 1 -- its cost is modest and doesn't
-            # justify spending battery wear to chase it to zero.
-            net_delivered = actual[t]
-        elif gap_mw > 0:
-            # Shortfall beyond Band 1 -- discharge just enough to pull the
-            # gap back down to the Band 1 edge, not all the way to zero.
-            need = gap_mw - threshold_mw
+        if gap_mw > discharge_threshold_mw:
+            # Shortfall past the trigger -- discharge just enough to pull
+            # the gap back to the trigger edge, not all the way to zero.
+            need = gap_mw - discharge_threshold_mw
             dis = battery.discharge(need)
             net_delivered = actual[t] + dis
-        else:
+        elif -gap_mw > threshold_mw:
             # Excess beyond Band 1 -- charge just enough to pull the gap
             # back down to the Band 1 edge.
             need = (-gap_mw) - threshold_mw
             accepted = battery.charge(need)
             net_delivered = actual[t] - accepted
+        else:
+            # Inside the trigger -- not worth spending battery wear on.
+            net_delivered = actual[t]
 
         delivered.append(net_delivered)
         soc_series.append(battery.soc_mwh)
@@ -155,22 +192,30 @@ def run_s3(forecast, actual, plant, dsm_cfg: DsmConfig, scen: dict,
         sched = list(forecast)
 
     # ---- real-time dispatch against actuals ----
+    # Each block decides ONE net battery flow. Previously the window step
+    # and the deviation-buffer step called the battery separately, so a
+    # charge-window block with a shortfall would store its planned share
+    # and then immediately discharge it again -- ~17 blocks/day of pointless
+    # cycling, paying wear and round-trip loss twice for nothing.
     buffer_dev = scen.get("buffer_deviations_outside_windows", True)
     delivered, soc_series, thr = [], [], []
     for t in range(BLOCKS):
         thr0 = battery.throughput_mwh
-        to_grid = actual[t]
-        if chg_win[t]:
-            accepted = battery.charge(min(actual[t] * frac, plan_chg[t]))
-            to_grid = actual[t] - accepted
-        if dis_win[t]:
-            to_grid += battery.discharge(plan_dis[t])
         if buffer_dev:
-            dev = to_grid - sched[t]
-            if dev > 0:
-                to_grid -= battery.charge(dev)
-            elif dev < 0:
-                to_grid += battery.discharge(-dev)
+            # aim delivery at the submitted schedule (which already carries
+            # the planned window charge/discharge, per D2)
+            target = sched[t]
+        else:
+            planned_chg = min(actual[t] * frac, plan_chg[t]) if chg_win[t] else 0.0
+            planned_dis = plan_dis[t] if dis_win[t] else 0.0
+            target = actual[t] - planned_chg + planned_dis
+        net = target - actual[t]  # >0: battery must export, <0: absorb
+        if net > 0:
+            to_grid = actual[t] + battery.discharge(net)
+        elif net < 0:
+            to_grid = actual[t] - battery.charge(-net)
+        else:
+            to_grid = actual[t]
         delivered.append(to_grid)
         soc_series.append(battery.soc_mwh)
         thr.append(battery.throughput_mwh - thr0)

@@ -93,6 +93,11 @@ def solve_optimal_dispatch(
     for t in range(n):
         d = actual_mw[t] - chg[t] + dis[t]
         delivered.append(d)
+        # The battery charges only from the plant's own generation (no grid
+        # import), and the schedule can't exceed the contracted capacity --
+        # the same limits every rule-based scenario lives under.
+        prob += chg[t] <= actual_mw[t]
+        prob += sched[t] <= plant["plant_mw"]
         prob += soc[t + 1] == soc[t] + eta * chg[t] * DT - (dis[t] / eta) * DT
 
         dev = delivered[t] - sched[t]  # symbolic; used only to build constraints below
@@ -108,7 +113,8 @@ def solve_optimal_dispatch(
                             for t in range(n) for k in range(n_bands))
     payable = pulp.lpSum(under_rates[k] * y_under[t][k] * cr_per_mwh
                          for t in range(n) for k in range(n_bands))
-    degradation = pulp.lpSum((chg[t] + dis[t]) * DT * KWH_PER_MWH
+    # cell-side throughput, identical to core.battery.Battery
+    degradation = pulp.lpSum((eta * chg[t] + dis[t] / eta) * DT * KWH_PER_MWH
                              * degradation_inr_per_kwh * 0.5 for t in range(n))
 
     prob += revenue + receivable - payable - degradation
@@ -131,7 +137,7 @@ def solve_optimal_dispatch(
         deliv_v = pulp.value(delivered[t])
         chg_v, dis_v = pulp.value(chg[t]), pulp.value(dis[t])
         soc_v = pulp.value(soc[t + 1])
-        thr = (chg_v + dis_v) * DT
+        thr = (eta * chg_v + dis_v / eta) * DT  # cell-side, as in Battery
 
         s = settle_block(BlockInput(sched_v * DT, deliv_v * DT, avc, rate, t), dsm_cfg)
         ppa = sched_v * DT * cr_per_mwh
