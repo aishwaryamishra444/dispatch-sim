@@ -1008,8 +1008,8 @@ def page_home():
         "team's output, validated end to end.</p></div>"
         '<div class="hx-stat"><div class="v">60+</div><p>Automated tests, run on every '
         'change to the engine.</p></div>'
-        '<div class="hx-stat"><div class="v">Rs 0</div><p>Difference between this app and '
-        'the engine across all 68 real days.</p></div>'
+        '<div class="hx-stat"><div class="v">5</div><p>Dispatch strategies compared on '
+        'every block, from no battery to perfect hindsight.</p></div>'
         '</div></div>'
         '<div class="hx-final"><div class="hx-h2" style="margin:0 auto 26px">'
         'Ready to run your plant?</div></div>')
@@ -2349,6 +2349,7 @@ st.write("")
 st.markdown(
     f'<div style="display:flex;align-items:center;gap:8px;color:{GREY};'
     f'font-size:0.82rem;">{au_mark(18)}<span>Atria University Centre of '
-    f'Excellence -- dispatch_sim -- github.com/aishwaryamishra444/dispatch-sim'
-    f' -- some regulatory and cost inputs are provisional pending team review</span></div>',
+    f'Excellence &nbsp;·&nbsp; <a href="https://github.com/aishwaryamishra444/dispatch-sim" '
+    f'target="_blank" style="color:inherit;">Source on GitHub</a> &nbsp;·&nbsp; '
+    f'Some tariff and cost inputs are provisional, pending team review.</span></div>',
     unsafe_allow_html=True)
