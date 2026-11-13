@@ -1287,7 +1287,8 @@ def dsm_explainer(b, tariff: float, avc_mwh: float):
                                    "Extra: energy (MWh)": "{:.4f}", "Received (Rs)": "{:,.2f}"}),
                  hide_index=True, use_container_width=True)
     st.caption(
-        f"Today: {n_short} blocks short, {n_over} blocks over, {96 - n_short - n_over} exact.\n\n"
+        f"Today: {n_short} blocks short, {n_over} blocks over, {96 - n_short - n_over} on schedule "
+        f"(mostly night, when nothing is scheduled).\n\n"
         f"**DSM net = {_rs(recv)} received - {_rs(pay)} paid = {_rs(recv - pay)}**")
     if worst is not None:
         parts = " + ".join(f"{sl.energy_mwh:.4f} MWh x {sl.rate_fraction:g}"
