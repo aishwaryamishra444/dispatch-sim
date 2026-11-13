@@ -100,13 +100,14 @@ def solve_optimal_dispatch(
         prob += sched[t] <= plant["plant_mw"]
         prob += soc[t + 1] == soc[t] + eta * chg[t] * DT - (dis[t] / eta) * DT
 
-        dev = delivered[t] - sched[t]  # symbolic; used only to build constraints below
+        # Band slices y are ENERGY (MWh per block), like AvC; delivered and
+        # sched are POWER (MW), so the deviation is converted with x DT.
         for k in range(n_bands):
             cap = band_width_pct[k] if band_width_pct[k] != float("inf") else BIG_M_PCT
             prob += y_over[t][k] <= cap / 100.0 * avc
             prob += y_under[t][k] <= cap / 100.0 * avc
-        prob += pulp.lpSum(y_over[t]) >= (delivered[t] - sched[t])
-        prob += pulp.lpSum(y_under[t]) >= (sched[t] - delivered[t])
+        prob += pulp.lpSum(y_over[t]) >= (delivered[t] - sched[t]) * DT
+        prob += pulp.lpSum(y_under[t]) >= (sched[t] - delivered[t]) * DT
 
     revenue = pulp.lpSum(sched[t] * DT * cr_per_mwh for t in range(n))
     receivable = pulp.lpSum(over_rates[k] * y_over[t][k] * cr_per_mwh
