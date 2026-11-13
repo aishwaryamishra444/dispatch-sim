@@ -27,6 +27,7 @@ for _m in [m for m in _sys.modules if m == "dispatch_sim" or m.startswith("dispa
     del _sys.modules[_m]
 
 from dispatch_sim.core.battery import Battery
+from dispatch_sim.core.dsm_settlement import BlockInput, settle_block
 from dispatch_sim.io.loaders import load_dsm_config, load_yaml, load_series_csv_buffer
 from dispatch_sim.io.engine_file import detect_columns, detect_unit, parse_engine_file, read_table
 from dispatch_sim.io.iex_loader import IEXFormatError, parse_iex_file
@@ -1229,6 +1230,119 @@ def page_setup():
 
 
 
+
+def _rs(v: float) -> str:
+    """Rupees for explainers: paise shown when amounts are small (tiny plants)."""
+    v = v + 0.0
+    return f"Rs {v:,.2f}" if abs(v) < 100 else f"Rs {v:,.0f}"
+
+
+def _band_labels(edges):
+    lows = (0.0,) + tuple(edges)
+    return [f"{lo:g}-{hi:g}%" for lo, hi in zip(lows, edges)] + [f"above {edges[-1]:g}%"]
+
+
+def dsm_explainer(b, tariff: float, avc_mwh: float):
+    """'How is DSM net calculated?' -- re-settles this scenario's 96 blocks
+    with the same settle_block the engine uses, then shows the band totals."""
+    bands = dsm_cfg.bands
+    labels = _band_labels(bands.edges_pct)
+    n = len(labels)
+    short_e, short_rs, over_e, over_rs = [0.0] * n, [0.0] * n, [0.0] * n, [0.0] * n
+    n_short = n_over = 0
+    worst, worst_set = None, None
+    for t, row in enumerate(b.rows):
+        st_ = settle_block(BlockInput(row.scheduled_mwh, row.delivered_mwh, avc_mwh, tariff, t),
+                           dsm_cfg)
+        if abs(st_.deviation_mwh) < 1e-12:
+            continue
+        over = st_.deviation_mwh > 0
+        n_over += over
+        n_short += not over
+        for sl in st_.slices:
+            (over_e if over else short_e)[sl.band] += sl.energy_mwh
+            (over_rs if over else short_rs)[sl.band] += sl.amount_inr
+        if worst is None or abs(st_.deviation_mwh) > abs(worst_set.deviation_mwh):
+            worst, worst_set = row, st_
+    recv, pay = b.total("dsm_receivable"), b.total("dsm_payable")
+    pen = b.total("dsm_penalty")
+    st.caption(
+        "**DSM net = money received for extra power - money paid back for missing power**, "
+        "added up over the 96 fifteen-minute blocks.\n\n"
+        "For each block: **deviation = delivered - scheduled**, and "
+        f"**deviation % = |deviation| / Available Capacity x 100**, where Available "
+        f"Capacity = plant size x 0.25 h = **{avc_mwh:.4g} MWh per block**. The deviation "
+        "is cut into CERC band slices, like tax slabs, and each slice is settled at its "
+        f"own multiple of the tariff (Rs {tariff:.2f}/kWh = Rs {tariff * 1000:,.0f}/MWh).")
+    tbl = pd.DataFrame({
+        "Band (% of capacity)": labels,
+        "Short: rate x tariff": [f"{r:g}x" for r in bands.under_rates],
+        "Short: energy (MWh)": short_e,
+        "Paid (Rs)": short_rs,
+        "Extra: rate x tariff": [f"{r:g}x" for r in bands.over_rates],
+        "Extra: energy (MWh)": over_e,
+        "Received (Rs)": over_rs,
+    })
+    st.dataframe(tbl.style.format({"Short: energy (MWh)": "{:.4f}", "Paid (Rs)": "{:,.2f}",
+                                   "Extra: energy (MWh)": "{:.4f}", "Received (Rs)": "{:,.2f}"}),
+                 hide_index=True, use_container_width=True)
+    st.caption(
+        f"Today: {n_short} blocks short, {n_over} blocks over, {96 - n_short - n_over} exact.\n\n"
+        f"**DSM net = {_rs(recv)} received - {_rs(pay)} paid = {_rs(recv - pay)}**")
+    if worst is not None:
+        parts = " + ".join(f"{sl.energy_mwh:.4f} MWh x {sl.rate_fraction:g}"
+                           for sl in worst_set.slices)
+        kind = "extra" if worst_set.deviation_mwh > 0 else "short"
+        verb = "received" if worst_set.deviation_mwh > 0 else "paid"
+        st.caption(
+            f"**Example, the biggest miss ({worst.time}):** scheduled "
+            f"{worst.scheduled_mwh:.4f} MWh, delivered {worst.delivered_mwh:.4f} MWh, so "
+            f"{abs(worst_set.deviation_mwh):.4f} MWh {kind} = "
+            f"{abs(worst_set.deviation_pct):.1f}% of capacity. "
+            f"Settled as ({parts}) x Rs {tariff * 1000:,.0f}/MWh = "
+            f"**{_rs(worst_set.receivable_inr or worst_set.payable_inr)} {verb}**; "
+            f"penalty in this block {_rs(worst_set.penalty_inr)}.")
+    st.caption(
+        f"**DSM penalty ({_rs(pen)})** is a different number: only the loss compared with a "
+        "perfect forecast. Inside the first band the rate is 1x, so short blocks just pay "
+        "back the tariff and extra blocks are paid the tariff, with no loss. Beyond it, "
+        "short energy costs more than the tariff and extra energy earns less. "
+        f"Check: PPA revenue + DSM net = {_rs(b.total('ppa_revenue') + recv - pay)} = "
+        f"delivered energy x tariff ({_rs(sum(r.delivered_mwh for r in b.rows) * tariff * 1000)}) "
+        f"- penalty ({_rs(pen)}).")
+
+
+def wear_explainer(b, has_battery: bool):
+    """'How is battery wear calculated?' -- the same formula as the ledger:
+    energy through the cells (in + out) x Rs/kWh cycled x 0.5."""
+    wear = b.total("degradation")
+    price, cycles = float(ss["deg_price"]), warranted_cycles
+    st.caption(
+        "**Wear cost per kWh cycled = battery price per kWh / warranted cycles**\n\n"
+        f"= Rs {price:,.0f} / {cycles:,.0f} cycles = Rs {computed_deg:.2f}"
+        + (f" (limited to Rs {deg:.2f}, the simulator's range is Rs {DEG_MIN:.2f}-{DEG_MAX:.2f})"
+           if deg != computed_deg else "")
+        + f" per kWh cycled. Set in Set up, step 4.")
+    if not has_battery:
+        st.caption("This scenario has no battery, so no energy is cycled: **wear = Rs 0**.")
+        return
+    cycled_mwh = wear / (deg * 0.5 * 1000) if deg > 0 else 0.0
+    full_cycles = (cycled_mwh / 2) / cap if cap > 0 else 0.0
+    if cycled_mwh < 1e-9:
+        st.caption("The battery did not move any energy today: **wear = Rs 0**.")
+        return
+    st.caption(
+        "**Battery wear = energy into the cells + energy out of the cells (MWh) x 1,000 "
+        "x wear cost per kWh x 0.5**\n\n"
+        f"= {cycled_mwh:.4f} MWh x 1,000 x Rs {deg:.2f} x 0.5 = **{_rs(wear)}**\n\n"
+        "The x 0.5 is there because one full cycle is one charge plus one discharge: "
+        "energy is counted both going in and coming out, so halving it gives the "
+        f"cycles used. Today that is {cycled_mwh / 2:.4f} MWh cycled, about "
+        f"{full_cycles:.2f} full cycles of the {_energy_text(cap)} battery. Energy is "
+        "measured at the cells (after the ~6% one-way loss on charging), since that is "
+        "what wears the battery.")
+
+
 def page_results():
     st.markdown("### Results")
     prov = ((real_source_note or "real uploaded generation data") if using_real
@@ -1318,6 +1432,10 @@ def page_results():
                         "forecast (team decision D1). Less scheduled energy means "
                         "less PPA revenue, even on the same weather day."
                     )
+            with st.expander("How is DSM net calculated?"):
+                dsm_explainer(b, ppa, plant_capacity_mw * 0.25)
+            with st.expander("How is battery wear calculated?"):
+                wear_explainer(b, not name.startswith("S1"))
 
             if live_attempt is not None:
                 # S3-specific: the ONLY big bold number shown is always S3's
