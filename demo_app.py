@@ -170,11 +170,11 @@ def energy_flow_diagram() -> str:
          font-family="sans-serif">
       <text x="10" y="24" font-size="11" font-weight="700" letter-spacing="1.5"
             fill="{GREY}">PHYSICAL POWER FLOW</text>
-      {node(20, 40, 140, 110, "Solar PV", "10 MW plant", "#FFF7E6")}
+      {node(20, 40, 140, 110, "Solar PV", f"{_size_text(plant_capacity_mw)} plant", "#FFF7E6")}
       {solar_icon}
       {node(230, 40, 150, 110, "PCC / Meter", "point of common coupling", "#F4F6F8")}
       {node(500, 40, 160, 110, "Grid / DISCOM", "scheduled injection", "#EEF0FF")}
-      {node(230, 190, 150, 110, "BESS", "20 MW / 40 MWh", "#EAF7EC")}
+      {node(230, 190, 150, 110, "BESS", f"{_size_text(C_RATE_PER_MWH * cap)} / {_energy_text(cap)}", "#EAF7EC")}
 
       {arrow(160, 95, 230, 95)}
       {arrow(380, 95, 500, 95)}
@@ -243,21 +243,23 @@ ss = st.session_state
 MODE_SYNTH = "Synthetic (demo)"
 MODE_ENGINE = "Forecast-engine file (multi-day)"
 MODE_SINGLE = "Upload real day"
-SCALE_SCALED = "Scaled to the contracted plant"
-SCALE_OWN = "Its own size (contracted capacity set to match)"
 
 DEFAULTS = {
-    "plant_cap": 10.0, "real_cap": 10.0, "data_mode": MODE_SYNTH, "err": 12,
+    "plant_unit": "MW", "plant_size": 10.0, "real_size": 10.0,
+    "data_mode": MODE_SYNTH, "err": 12,
     "ppa": 2.60, "bess_hours": 4.0, "deg_calc_mode": "Cycles",
     "deg_price": 16_320.0, "deg_cycles": 6000.0, "deg_years": 15.0, "deg_cpd": 1.0,
-    "engine_unit": "kW", "engine_tz": "UTC", "engine_src_cap": 5.0,
-    "engine_scale": SCALE_SCALED, "seed": 20260614,
+    "engine_unit": "kW", "engine_tz": "UTC",
+    "engine_scale_on": False, "engine_target_mw": 10.0, "seed": 20260614,
 }
 for _k, _v in DEFAULTS.items():
     ss.setdefault(_k, _v)
 for _k in list(DEFAULTS) + ["engine_day"]:
     if _k in ss:
         ss[_k] = ss[_k]   # keep the value alive while its widget isn't on screen
+if "_pending_plant" in ss:   # set by a file upload: the file's plant becomes the plant
+    ss["plant_unit"], ss["plant_size"] = ss.pop("_pending_plant")
+    ss["real_size"] = ss["plant_size"]
 
 
 @st.cache_data(show_spinner=False)
@@ -284,14 +286,25 @@ def _engine_has_offset(raw: bytes) -> bool:
 
 
 def _reset_engine_capacity():
-    """Default 'this plant's capacity' to the file's peak, rounded up, in the
-    chosen unit -- re-run whenever the file or its unit changes."""
+    """An uploaded file describes a real plant, so it sets the plant size:
+    the file's peak rounded up, in the file's own unit. Re-run whenever the
+    file or its unit changes; the user can then type the real nameplate."""
     try:
         eng_ = _parse_engine_cached(ss["engine_raw"], ss["engine_unit"], ss["engine_tz"])
         peak = eng_.peak_mw * (1000 if ss["engine_unit"] == "kW" else 1)
-        ss["engine_src_cap"] = _nice_ceiling(peak)
+        # Applied at the top of the next run, before the step-1 widgets exist
+        # (a widget's value can't be changed once it is on the page).
+        ss["_pending_plant"] = (ss["engine_unit"], _nice_ceiling(peak))
+        ss["engine_peak_txt"] = f"{peak:.3f} {ss['engine_unit']}"
     except Exception:  # noqa: BLE001 -- the Setup page shows the parse error
         pass
+
+
+def _on_plant_unit_change():
+    """Switching kW <-> MW keeps the same physical plant: convert the numbers."""
+    k = 1000.0 if ss["plant_unit"] == "kW" else 0.001
+    ss["plant_size"] = round(float(ss["plant_size"]) * k, 6)
+    ss["real_size"] = round(float(ss["real_size"]) * k, 6)
 
 
 def _on_engine_upload():
@@ -332,8 +345,9 @@ def _on_single_upload(which: str):
 
 
 # ---- derive this run's inputs from the saved settings (no widgets here) ----
-plant_capacity_mw = float(ss["plant_cap"])
-real_capacity_mw = float(ss["real_cap"])
+_to_mw = 0.001 if ss["plant_unit"] == "kW" else 1.0
+plant_capacity_mw = max(float(ss["plant_size"]), 1e-9) * _to_mw   # the real plant
+real_capacity_mw = max(float(ss["real_size"]), 1e-9) * _to_mw
 data_mode = ss["data_mode"]
 err = int(ss["err"])
 ppa = float(ss["ppa"])
@@ -351,14 +365,16 @@ if data_mode == MODE_ENGINE and ss.get("engine_raw"):
     except Exception as e:  # noqa: BLE001
         engine_error = str(e)
     if eng is not None:
-        unit_k = 1000 if ss["engine_unit"] == "kW" else 1
-        src_cap_mw = max(float(ss["engine_src_cap"]), 1e-6) / unit_k
-        if ss["engine_scale"] != SCALE_OWN:
-            k_scale = plant_capacity_mw / src_cap_mw
+        # The file's plant is the plant in step 1. By default it is simulated
+        # at its own size; the optional "what if" scales the same weather and
+        # forecast error onto a plant of another size.
+        src_cap_mw = plant_capacity_mw
+        if ss["engine_scale_on"]:
+            k_scale = max(float(ss["engine_target_mw"]), 1e-6) / src_cap_mw
+            plant_capacity_mw = src_cap_mw * k_scale
+            real_capacity_mw = real_capacity_mw * k_scale
         else:
             k_scale = 1.0
-            plant_capacity_mw = src_cap_mw
-            real_capacity_mw = src_cap_mw
         engine_days_mw = {d: ([x * k_scale for x in fc], [x * k_scale for x in ac])
                           for d, (fc, ac) in eng.days.items()}
         if ss.get("engine_day") not in engine_days_mw:
@@ -377,19 +393,19 @@ elif data_mode == MODE_SINGLE and ss.get("single_fc") and ss.get("single_act"):
 # MW, or a profile from a different-sized plant, before it silently produces
 # meaningless settlement numbers.
 data_warnings = []
+_pw = lambda mw: f"{mw:.4g} MW" if mw >= 1 else f"{mw * 1000:.4g} kW"  # noqa: E731
 if real_forecast is not None and real_actual is not None:
     up_peak = max(max(real_forecast), max(real_actual))
     if up_peak > plant_capacity_mw * 1.02:
         data_warnings.append(
-            f"This day peaks at {up_peak:.3f} MW -- above the {plant_capacity_mw:g} MW "
-            f"contracted capacity. Check the unit (kW vs MW) or raise the capacity; "
+            f"This day peaks at {_pw(up_peak)} -- above the {_pw(plant_capacity_mw)} "
+            f"plant capacity. Check the unit (kW vs MW) or raise the capacity in step 1; "
             f"deviation percentages will be wrong otherwise.")
     elif 0 < up_peak < plant_capacity_mw * 0.10:
         data_warnings.append(
-            f"This day peaks at only {up_peak:.4f} MW -- under 10% of the "
-            f"{plant_capacity_mw:g} MW contracted capacity. If the values are kW or "
-            f"come from a smaller plant, use the 'Forecast-engine file' option to set "
-            f"the unit and scale, or lower the capacity.")
+            f"This day peaks at only {_pw(up_peak)} -- under 10% of the "
+            f"{_pw(plant_capacity_mw)} plant capacity. Check the unit (kW vs MW) "
+            f"or lower the capacity in step 1.")
 
 # Battery wear cost: price per kWh (scaled by capacity) over warranted cycles.
 usable_kwh = bess_hours * plant_capacity_mw * 1000
@@ -411,6 +427,25 @@ def _size_text(mw: float) -> str:
 
 def _energy_text(mwh: float) -> str:
     return f"{mwh:,.3g} MWh" if mwh >= 1 else f"{mwh * 1000:,.3g} kWh"
+
+
+# Display units follow the plant: a sub-MW plant is shown in kW / kWh
+# everywhere (charts, explainers, tables). The engine always works in MW.
+PU = "kW" if plant_capacity_mw < 1 else "MW"
+EU = "kWh" if PU == "kW" else "MWh"
+UF = 1000.0 if PU == "kW" else 1.0
+
+
+if PU == "kW":
+    # A small plant earns tens of rupees a day: show paise, so small amounts
+    # don't round to "Rs 0" / "Rs -0".
+    INR = lambda v: f"Rs {v + 0.0:,.2f}"  # noqa: E731
+MONEY_FMT = "{:,.2f}" if PU == "kW" else "{:,.0f}"
+
+
+def _e(mwh: float, digits: int = 4) -> str:
+    """Energy in the plant's display unit."""
+    return f"{mwh * UF:,.{digits}f} {EU}"
 
 
 # ---- sidebar: brand + a short summary of what is being simulated ----------
@@ -650,10 +685,10 @@ def build_3d_diagram():
     Plotly (already proven reliable elsewhere in this app), rendered
     natively -- no custom HTML/SVG embedding involved."""
     physical = [
-        ("Solar PV", "10 MW plant", 0, 2, 1.4, "#F59E0B"),
+        ("Solar PV", f"{_size_text(plant_capacity_mw)} plant", 0, 2, 1.4, "#F59E0B"),
         ("PCC / Meter", "point of common coupling", 1, 2, 1.4, INK),
         ("Grid / DISCOM", "scheduled injection", 2.1, 2.6, 1.4, BLUE),
-        ("BESS", "20 MW / 40 MWh", 1, 1.1, 1.4, GREEN),
+        ("BESS", f"{_size_text(C_RATE_PER_MWH * cap)} / {_energy_text(cap)}", 1, 1.1, 1.4, GREEN),
     ]
     commercial = [
         ("Forecast", "day-ahead generation", 0, 0, 0, INK),
@@ -1040,27 +1075,36 @@ def page_setup():
 
     # ---- 1. Plant ---------------------------------------------------------
     with st.container(border=True):
-        _step(1, "Your plant", "How big the solar plant is on paper.")
-        st.number_input(
-            "Contracted capacity (MW)", min_value=0.001, max_value=500.0,
-            step=0.5, format="%.3f", key="plant_cap",
-            help="The plant size written in the power purchase agreement (PPA). "
-                 "CERC measures every deviation as a % of this, so it decides "
-                 "which penalty band a shortfall falls into. O&M cost scales "
-                 "with it too.")
+        _step(1, "Your plant", "How big the solar plant is. Use kW for a small "
+                               "plant and MW for a large one; every result and chart "
+                               "follows this unit.")
+        u_ = ss["plant_unit"]
+        c1, c2 = st.columns([3, 1], vertical_alignment="bottom")
+        with c1:
+            st.number_input(
+                f"Plant capacity ({u_})", min_value=0.001, max_value=500_000.0,
+                step=1.0 if u_ == "kW" else 0.5, format="%.3f", key="plant_size",
+                help="The plant size written in the power purchase agreement (PPA), "
+                     "usually the inverter (AC) rating. CERC measures every deviation "
+                     "as a % of this, so it decides which penalty band a miss falls "
+                     "into. O&M cost and battery size scale with it.")
+        with c2:
+            st.radio("Unit", ["kW", "MW"], key="plant_unit", horizontal=True,
+                     on_change=_on_plant_unit_change)
+        if data_mode == MODE_ENGINE and engine_days_mw and ss.get("engine_peak_txt"):
+            st.caption(f":blue[Set from your uploaded file: it peaks at "
+                       f"{ss['engine_peak_txt']}, rounded up. Type the real nameplate "
+                       f"if you know it -- every result depends on it.]")
         with st.expander("Advanced: real achievable capacity"):
             st.number_input(
-                "Real achievable capacity (MW)", min_value=0.001, max_value=500.0,
-                step=0.5, format="%.3f", key="real_cap",
+                f"Real achievable capacity ({u_})", min_value=0.001, max_value=500_000.0,
+                step=1.0 if u_ == "kW" else 0.5, format="%.3f", key="real_size",
                 help="What the plant can physically produce (inverter limits, "
                      "panel losses). Caps generation on synthetic days only; "
-                     "penalties are still measured against the contracted figure.")
-            if ss["real_cap"] > ss["plant_cap"]:
-                st.caption(":orange[Above the contracted capacity -- generation "
-                           "will be capped at the contracted figure.]")
-        if data_mode == MODE_ENGINE and ss["engine_scale"] == SCALE_OWN and engine_days_mw:
-            st.caption(f":blue[Using the uploaded plant's own size "
-                       f"({_size_text(plant_capacity_mw)}) -- set in step 2.]")
+                     "penalties are still measured against the plant capacity.")
+            if ss["real_size"] > ss["plant_size"]:
+                st.caption(":orange[Above the plant capacity -- generation "
+                           "will be capped at the plant capacity.]")
 
     # ---- 2. Generation data -----------------------------------------------
     with st.container(border=True):
@@ -1128,24 +1172,25 @@ def page_setup():
                                     f"filled from their neighbours.")
                             for d, why in eng.skipped.items():
                                 st.caption(f"{d}: skipped -- {why}")
-                    unit = ss["engine_unit"]
-                    peak_u = eng.peak_mw * (1000 if unit == "kW" else 1)
-                    st.number_input(
-                        f"This plant's capacity ({unit})", min_value=0.001,
-                        step=0.5 if unit == "kW" else 0.1, format="%.3f",
-                        key="engine_src_cap",
-                        help=f"The real nameplate of the plant this data came "
-                             f"from. The file peaks at {peak_u:.3f} {unit}; the "
-                             f"default rounds that up. It decides how the profile "
-                             f"is scaled, so use the real figure if you know it.")
-                    st.radio(
-                        "Run it as", [SCALE_SCALED, SCALE_OWN], key="engine_scale",
-                        captions=[f"Expressed on the {ss['plant_cap']:g} MW plant from step 1.",
-                                  "Runs the plant at the size entered above."],
-                        help="Scaling keeps each day's real shape and forecast "
-                             "error but expresses it on the contracted plant, so "
-                             "rupee figures and battery sizes are comparable.")
-                    st.caption("Pick which day to look at on the Results page.")
+                    st.caption(f"The plant is simulated at its own size, "
+                               f"**{_size_text(src_cap_mw)}** (step 1), and every "
+                               f"result is shown in its units. Pick which day to "
+                               f"look at on the Results page.")
+                    with st.expander("Advanced: run this weather on a different plant size"):
+                        st.checkbox(
+                            "Simulate a plant of another size with this weather",
+                            key="engine_scale_on",
+                            help="Multiplies every reading by (new size / your plant "
+                                 "size). Each day's shape and forecast error, and so "
+                                 "every deviation % and CERC band, stay the same; "
+                                 "energy, rupees and battery size scale.")
+                        if ss["engine_scale_on"]:
+                            st.number_input("Simulated plant size (MW)", min_value=0.001,
+                                            max_value=500.0, step=0.5, format="%.3f",
+                                            key="engine_target_mw")
+                            st.caption(f"Every reading x {k_scale:,.4g}. Results now "
+                                       f"describe a {_size_text(plant_capacity_mw)} plant "
+                                       f"with your plant's weather.")
 
         else:  # MODE_SINGLE
             st.caption("CSV format: columns `time,mw` -- 96 rows (15-min blocks), "
@@ -1190,7 +1235,8 @@ def page_setup():
             "Battery size (hours of plant capacity)", 0.5, 8.0, step=0.5,
             key="bess_hours",
             help="Usable energy = hours x contracted capacity. Power is half the "
-                 "energy per hour (0.5C). 4 h on a 10 MW plant = 40 MWh, 20 MW.")
+                 "energy per hour (0.5C). 4 h on a 10 MW plant = 40 MWh, 20 MW; "
+                 "on a 5 kW plant = 20 kWh, 10 kW.")
         st.caption(f"= {_energy_text(cap)} usable, "
                    f"{_size_text(C_RATE_PER_MWH * cap)} power, 88% round-trip "
                    f"efficiency.")
@@ -1271,36 +1317,36 @@ def dsm_explainer(b, tariff: float, avc_mwh: float):
         "added up over the 96 fifteen-minute blocks.\n\n"
         "For each block: **deviation = delivered - scheduled**, and "
         f"**deviation % = |deviation| / Available Capacity x 100**, where Available "
-        f"Capacity = plant size x 0.25 h = **{avc_mwh:.4g} MWh per block**. The deviation "
+        f"Capacity = plant size x 0.25 h = **{_e(avc_mwh, 4)} per block**. The deviation "
         "is cut into CERC band slices, like tax slabs, and each slice is settled at its "
-        f"own multiple of the tariff (Rs {tariff:.2f}/kWh = Rs {tariff * 1000:,.0f}/MWh).")
+        f"own multiple of the tariff (Rs {tariff:.2f}/kWh).")
     tbl = pd.DataFrame({
         "Band (% of capacity)": labels,
         "Short: rate x tariff": [f"{r:g}x" for r in bands.under_rates],
-        "Short: energy (MWh)": short_e,
+        f"Short: energy ({EU})": [x * UF for x in short_e],
         "Paid (Rs)": short_rs,
         "Extra: rate x tariff": [f"{r:g}x" for r in bands.over_rates],
-        "Extra: energy (MWh)": over_e,
+        f"Extra: energy ({EU})": [x * UF for x in over_e],
         "Received (Rs)": over_rs,
     })
-    st.dataframe(tbl.style.format({"Short: energy (MWh)": "{:.4f}", "Paid (Rs)": "{:,.2f}",
-                                   "Extra: energy (MWh)": "{:.4f}", "Received (Rs)": "{:,.2f}"}),
+    st.dataframe(tbl.style.format({f"Short: energy ({EU})": "{:,.4f}", "Paid (Rs)": "{:,.2f}",
+                                   f"Extra: energy ({EU})": "{:,.4f}", "Received (Rs)": "{:,.2f}"}),
                  hide_index=True, use_container_width=True)
     st.caption(
         f"Today: {n_short} blocks short, {n_over} blocks over, {96 - n_short - n_over} on schedule "
         f"(mostly night, when nothing is scheduled).\n\n"
         f"**DSM net = {_rs(recv)} received - {_rs(pay)} paid = {_rs(recv - pay)}**")
     if worst is not None:
-        parts = " + ".join(f"{sl.energy_mwh:.4f} MWh x {sl.rate_fraction:g}"
+        parts = " + ".join(f"{sl.energy_mwh * 1000:,.2f} kWh x {sl.rate_fraction:g}"
                            for sl in worst_set.slices)
         kind = "extra" if worst_set.deviation_mwh > 0 else "short"
         verb = "received" if worst_set.deviation_mwh > 0 else "paid"
         st.caption(
             f"**Example, the biggest miss ({worst.time}):** scheduled "
-            f"{worst.scheduled_mwh:.4f} MWh, delivered {worst.delivered_mwh:.4f} MWh, so "
-            f"{abs(worst_set.deviation_mwh):.4f} MWh {kind} = "
+            f"{_e(worst.scheduled_mwh)}, delivered {_e(worst.delivered_mwh)}, so "
+            f"{_e(abs(worst_set.deviation_mwh))} {kind} = "
             f"{abs(worst_set.deviation_pct):.1f}% of capacity. "
-            f"Settled as ({parts}) x Rs {tariff * 1000:,.0f}/MWh = "
+            f"Settled as ({parts}) x Rs {tariff:.2f}/kWh = "
             f"**{_rs(worst_set.receivable_inr or worst_set.payable_inr)} {verb}**; "
             f"penalty in this block {_rs(worst_set.penalty_inr)}.")
     st.caption(
@@ -1333,12 +1379,12 @@ def wear_explainer(b, has_battery: bool):
         st.caption("The battery did not move any energy today: **wear = Rs 0**.")
         return
     st.caption(
-        "**Battery wear = energy into the cells + energy out of the cells (MWh) x 1,000 "
+        "**Battery wear = (energy into the cells + energy out of the cells, in kWh) "
         "x wear cost per kWh x 0.5**\n\n"
-        f"= {cycled_mwh:.4f} MWh x 1,000 x Rs {deg:.2f} x 0.5 = **{_rs(wear)}**\n\n"
+        f"= {cycled_mwh * 1000:,.2f} kWh x Rs {deg:.2f} x 0.5 = **{_rs(wear)}**\n\n"
         "The x 0.5 is there because one full cycle is one charge plus one discharge: "
         "energy is counted both going in and coming out, so halving it gives the "
-        f"cycles used. Today that is {cycled_mwh / 2:.4f} MWh cycled, about "
+        f"cycles used. Today that is {_e(cycled_mwh / 2)} cycled, about "
         f"{full_cycles:.2f} full cycles of the {_energy_text(cap)} battery. Energy is "
         "measured at the cells (after the ~6% one-way loss on charging), since that is "
         "what wears the battery.")
@@ -1402,7 +1448,7 @@ def page_results():
                 items.append("Battery stock change")
                 amounts.append(inv + 0.0)
             df = pd.DataFrame({"Line item": items, "Amount (Rs)": amounts})
-            st.dataframe(df.style.format({"Amount (Rs)": "{:,.0f}"}),
+            st.dataframe(df.style.format({"Amount (Rs)": MONEY_FMT}),
                         hide_index=True, use_container_width=True,
                         height=35 * (len(items) + 1) + 3)
             if abs(inv) >= 0.5:
@@ -1415,12 +1461,12 @@ def page_results():
             total_sched_mwh = sum(row.scheduled_mwh for row in b.rows)
             with st.expander("How is PPA revenue calculated?"):
                 st.caption(
-                    f"**PPA Revenue = Total Scheduled Energy x 1,000 (MWh->kWh) x Tariff**\n\n"
-                    f"= {total_sched_mwh:.4f} MWh x 1,000 x Rs {ppa:.2f}/kWh\n\n"
+                    f"**PPA Revenue = Total Scheduled Energy (kWh) x Tariff**\n\n"
+                    f"= {total_sched_mwh * 1000:,.2f} kWh x Rs {ppa:.2f}/kWh\n\n"
                     f"= **Rs {b.total('ppa_revenue'):,.2f}**\n\n"
                     f"Not driven directly by plant capacity -- driven by *scheduled "
                     f"energy*, which is the sum of 96 individual 15-minute schedules. "
-                    f"Plant capacity ({plant_capacity_mw:g} MW) shapes that total "
+                    f"Plant capacity ({_size_text(plant_capacity_mw)}) shapes that total "
                     f"indirectly: it caps how much any single block can schedule "
                     f"(Available Capacity = capacity x 0.25h), and the day's overall "
                     f"shape scales with it."
@@ -1697,9 +1743,10 @@ def page_results():
             # strategy still genuinely charges/discharges when run, and that
             # real SoC curve is what the chart should show, not a flat line.
             chart_r = r3_raw if name == "S3 - Time windows" else r
-            sched_mw = [row.scheduled_mwh * 4 for row in chart_r.rows]
-            deliv_mw = [row.delivered_mwh * 4 for row in chart_r.rows]
-            actual_mw_list = [row.actual_gen_mwh * 4 for row in chart_r.rows]
+            # Chart series in the plant's display unit (kW for sub-MW plants).
+            sched_mw = [row.scheduled_mwh * 4 * UF for row in chart_r.rows]
+            deliv_mw = [row.delivered_mwh * 4 * UF for row in chart_r.rows]
+            actual_mw_list = [row.actual_gen_mwh * 4 * UF for row in chart_r.rows]
 
             # S1 has no battery, so it gets the power panel only -- an empty
             # battery panel under it just looked broken.
@@ -1716,7 +1763,7 @@ def page_results():
             # (0-5%) is NOT zero-penalty -- it's charged at 100% of tariff,
             # just the gentlest of the four tiers. Colors deepen with
             # severity to show which tier a delivery falls into, visually.
-            avc_mw_equiv = plant_capacity_mw  # AvC(MWh)=cap*DT; in MW-equiv terms (x4) = cap
+            avc_mw_equiv = plant_capacity_mw * UF  # AvC(MWh)=cap*DT; in power terms (x4) = cap
             band_edges_mw = [0.05 * avc_mw_equiv, 0.10 * avc_mw_equiv, 0.20 * avc_mw_equiv]
             band_colors = ["rgba(250,204,21,.16)", "rgba(249,115,22,.14)", "rgba(220,38,38,.12)"]
             band_labels = ["Band 1 (0-5% AvC)", "Band 2 (5-10% AvC)", "Band 3 (10-20% AvC)"]
@@ -1738,13 +1785,13 @@ def page_results():
                 prev_upper, prev_lower = upper, lower
 
             fig.add_scatter(x=hours, y=actual_mw_list,
-                            name="Actual gen (MW)",
+                            name=f"Actual gen ({PU})",
                             line=dict(color="rgba(245,158,11,.75)", width=4),
                             row=1, col=1)
-            fig.add_scatter(x=hours, y=sched_mw, name="Schedule (MW)",
+            fig.add_scatter(x=hours, y=sched_mw, name=f"Schedule ({PU})",
                             line=dict(color=INK, width=2.0, dash="dash"),
                             row=1, col=1)
-            fig.add_scatter(x=hours, y=deliv_mw, name="Delivered (MW)",
+            fig.add_scatter(x=hours, y=deliv_mw, name=f"Delivered ({PU})",
                             line=dict(color=BLUE, width=1.75),
                             fill="tonexty", fillcolor="rgba(61,52,224,.08)",
                             row=1, col=1)
@@ -1756,8 +1803,8 @@ def page_results():
             # invisible -- this makes the "how much did it correct for"
             # story visible, not just a number to read separately.
             if name == "S5 - Optimizer":
-                fig.add_scatter(x=hours, y=list(forecast),
-                               name="Original Forecast Schedule (MW)",
+                fig.add_scatter(x=hours, y=[v * UF for v in forecast],
+                               name=f"Original Forecast Schedule ({PU})",
                                line=dict(color="rgba(150,150,150,.65)",
                                        dash="dot", width=1.5), row=1, col=1)
 
@@ -1765,7 +1812,7 @@ def page_results():
             # schedule directly on top of this baseline's chart, so the
             # uplift is visible, not just a number to read separately.
             if r5 is not None and name != "S5 - Optimizer":
-                r5_sched_mw = [row.scheduled_mwh * 4 for row in r5.rows]
+                r5_sched_mw = [row.scheduled_mwh * 4 * UF for row in r5.rows]
                 fig.add_scatter(x=hours, y=r5_sched_mw, name="S5 Optimal Schedule",
                                line=dict(color="#9333EA", width=2.2, dash="dot"),
                                row=1, col=1)
@@ -1778,25 +1825,26 @@ def page_results():
             worst_idx = max(range(len(chart_r.rows)),
                            key=lambda i: abs(chart_r.rows[i].deviation_mwh))
             worst_row = chart_r.rows[worst_idx]
-            if abs(worst_row.deviation_mwh) > 0.001:
+            gap_tol_mwh = plant_capacity_mw * 1e-4   # 0.04% of a block's Available Capacity
+            if abs(worst_row.deviation_mwh) > gap_tol_mwh:
                 fig.add_scatter(
                     x=[hours[worst_idx]], y=[deliv_mw[worst_idx]],
                     mode="markers", marker=dict(size=13, color="#DC2626",
                     symbol="circle", line=dict(color="white", width=2)),
                     name="Largest deviation", showlegend=False,
-                    hovertext=[f"Gap: {worst_row.deviation_mwh:+.2f} MWh this block "
-                              f"-> Rs {worst_row.dsm_penalty:,.0f} penalty"],
+                    hovertext=[f"Gap: {worst_row.deviation_mwh * UF:+.3g} {EU} this block "
+                              f"-> {_rs(worst_row.dsm_penalty)} penalty"],
                     hoverinfo="text", row=1, col=1)
                 fig.add_annotation(
                     x=hours[worst_idx], y=deliv_mw[worst_idx],
-                    text=f"<b>Largest gap:</b> {worst_row.deviation_mwh:+.2f} MWh<br>"
-                         f"-> Rs {worst_row.dsm_penalty:,.0f} penalty",
+                    text=f"<b>Largest gap:</b> {worst_row.deviation_mwh * UF:+.3g} {EU}<br>"
+                         f"-> {_rs(worst_row.dsm_penalty)} penalty",
                     showarrow=True, arrowhead=2, arrowsize=0.8, arrowwidth=1.3,
                     arrowcolor="#9CA3AF",
                     ax=0, ay=-42, bgcolor="#F9FAFB", bordercolor="#E5E7EB",
                     borderwidth=1, borderpad=6, font=dict(size=11, color="#374151"),
                     row=1, col=1)
-            zero_deviation_today = abs(worst_row.deviation_mwh) <= 0.001
+            zero_deviation_today = abs(worst_row.deviation_mwh) <= gap_tol_mwh
 
             # ----------------- ROW 2: battery physics, own lane -----------
             soc = [row.soc_mwh for row in chart_r.rows]
@@ -1823,7 +1871,7 @@ def page_results():
                 # was already empty. Grid-side flow isn't used because
                 # round-trip losses make it negative even when the stored
                 # level is flat, as in S2's pass-through.)
-                MIN_STEP_MWH = 0.005  # ignore numerically-zero changes
+                MIN_STEP_MWH = cap * 1.25e-4  # ignore numerically-zero changes (0.005 MWh on 40 MWh)
                 opening_mwh = cap * opening_pct / 100
                 soc_mwh = [opening_mwh] + [x if x is not None else opening_mwh for x in soc]
                 state = []
@@ -1875,14 +1923,14 @@ def page_results():
                               hovermode="x unified", template="plotly_white")
             fig.update_xaxes(range=[0, 24], row=1, col=1,
                              title_text=None if _batt_panel else "Hour of day")
-            fig.update_yaxes(title_text="MW", row=1, col=1)
+            fig.update_yaxes(title_text=PU, row=1, col=1)
             if _batt_panel:
                 fig.update_xaxes(range=[0, 24], row=2, col=1, title_text="Hour of day")
                 fig.update_yaxes(title_text="Battery charge (%)", range=[0, 110],
                                  row=2, col=1)
 
             if zero_deviation_today and name == "S5 - Optimizer":
-                weather_noise_mwh = sum(abs(a - f) for a, f in zip(actual, forecast))
+                weather_noise_mwh = sum(abs(a - f) for a, f in zip(actual, forecast)) * DT
                 soc_now_pct = 100 * chart_r.rows[0].soc_mwh / cap if chart_r.rows[0].soc_mwh is not None else 0
                 penalty_saved = r1.total("dsm_penalty") - r.total("dsm_penalty")
                 wear_cost = r.total("degradation")
@@ -1899,8 +1947,8 @@ def page_results():
                 st.info(
                     f"**OPTIMIZER DISPATCH STRATEGY: PERFECT FORESIGHT ALIGNMENT**\n\n"
                     f"**Status:** Optimal convergence achieved (0.00% deviation exposure)\n\n"
-                    f"**Dynamic schedule morphing:** the engine saw {weather_noise_mwh:.1f} "
-                    f"MWh of intraday weather noise between forecast and actual, and "
+                    f"**Dynamic schedule morphing:** the engine saw {_e(weather_noise_mwh, 1)} "
+                    f"of intraday weather noise between forecast and actual, and "
                     f"re-declared the schedule to match physical generation exactly, "
                     f"eliminating DSM exposure entirely.\n\n"
                     f"**Asset protection:** because the PPA rate is flat (Rs {ppa:.2f}/kWh) "
@@ -2057,7 +2105,7 @@ def page_alldays():
             lit_ = [g for g, f_ in zip(gap_, fc_) if f_ > 0.01 * plant["plant_mw"]]
             ov_rows.append({
                 "Day": d_,
-                "Generation (MWh)": sum(ac_) * DT,
+                f"Generation ({EU})": sum(ac_) * DT * UF,
                 "Forecast error (%)": float(np.mean(lit_)) if lit_ else 0.0,
                 "Worst block (%)": max(gap_),
                 "S1 profit (Rs)": p1_,
@@ -2140,7 +2188,7 @@ def page_alldays():
 
                 st.dataframe(
                     show.style.apply(_hl, axis=1).format({
-                        "Generation (MWh)": "{:.1f}", "Forecast error (%)": "{:.1f}",
+                        f"Generation ({EU})": "{:,.1f}", "Forecast error (%)": "{:.1f}",
                         "Worst block (%)": "{:.0f}", "S1 profit (Rs)": "{:,.0f}",
                         "S1 DSM penalty (Rs)": "{:,.0f}", "S2 vs S1 (Rs)": "{:+,.0f}",
                         "S3 vs S1 (Rs)": "{:+,.0f}", "S4 vs S1 (Rs)": "{:+,.0f}"}),
@@ -2300,8 +2348,9 @@ def page_alldays():
         pick = st.selectbox("Scenario", names)
         r = results[pick]
         bl = pd.DataFrame([{
-            "time": row.time, "sched_mwh": row.scheduled_mwh,
-            "actual_mwh": row.actual_gen_mwh, "delivered_mwh": row.delivered_mwh,
+            "time": row.time, f"sched_{EU.lower()}": row.scheduled_mwh * UF,
+            f"actual_{EU.lower()}": row.actual_gen_mwh * UF,
+            f"delivered_{EU.lower()}": row.delivered_mwh * UF,
             "dev_%AvC": row.deviation_pct_of_avc,
             "dsm_recv": row.dsm_receivable, "dsm_pay": row.dsm_payable,
             "penalty": row.dsm_penalty, "battery_stock": row.inventory_inr,
